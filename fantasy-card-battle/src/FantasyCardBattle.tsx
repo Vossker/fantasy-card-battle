@@ -1,805 +1,34 @@
-import { useState, useRef, useEffect } from "react";
+// ================= 主组件:菜单 / 牌组构建 / 对战 UI =================
+import { useState, useRef, useEffect, type CSSProperties } from "react";
+import { POOL, RARITY, byId, maxCopies, HAND_LIMIT, kw, spSummary, cardDesc, spTarget, loadPlayerDeck } from "./cards";
+import {
+  clone, log, effCost, initGame, startTurn, playMinion, castSpell, castDeckSpell,
+  resolveAttack, removeFromDeck, summonFromDeck, sampleDeck, sampleDeckAny,
+  campEffect, campLabel, applyOpt, moonTutor, gainMoonCopy,
+} from "./engine";
+import { computeAiTurn } from "./ai";
+import { CSS, MinionEl, HeroEl, HandCard } from "./ui/components";
+import type { BloomMode, CampOpt, GameState, Side } from "./types";
 
-// ================= 卡牌数据(全部原创) =================
-const POOL = [
-  { id: 1, name: "农夫民兵", emoji: "👨‍🌾", cost: 1, type: "m", rarity: "c", atk: 2, hp: 1, desc: "拿起草叉保卫家园。" },
-  { id: 2, name: "新兵盾卫", emoji: "🛡️", cost: 1, type: "m", rarity: "c", atk: 1, hp: 2, taunt: 1, desc: "我来挡!" },
-  { id: 3, name: "灵猫", emoji: "🐈", cost: 1, type: "m", rarity: "c", atk: 1, hp: 1, charge: 1, desc: "敏捷如风。" },
-  { id: 4, name: "见习法师", emoji: "🧙", cost: 2, type: "m", rarity: "c", atk: 2, hp: 2, desc: "刚学会第一个法术。" },
-  { id: 5, name: "矮人战士", emoji: "🪓", cost: 2, type: "m", rarity: "c", atk: 3, hp: 2, desc: "山岭之子。" },
-  { id: 6, name: "石墙守护者", emoji: "🗿", cost: 2, type: "m", rarity: "c", atk: 1, hp: 4, taunt: 1, desc: "坚如磐石。" },
-  { id: 7, name: "游侠射手", emoji: "🏹", cost: 3, type: "m", rarity: "c", atk: 3, hp: 3, desc: "百步穿杨。" },
-  { id: 8, name: "狮鹫骑士", emoji: "🦅", cost: 3, type: "m", rarity: "r", atk: 2, hp: 3, charge: 1, desc: "自天空俯冲!" },
-  { id: 9, name: "暗影刺客", emoji: "🗡️", cost: 3, type: "m", rarity: "r", atk: 4, hp: 2, desc: "无声无息。" },
-  { id: 10, name: "圣殿骑士", emoji: "🤺", cost: 4, type: "m", rarity: "r", atk: 3, hp: 5, taunt: 1, desc: "以圣光之名。" },
-  { id: 11, name: "火焰元素", emoji: "🔥", cost: 4, type: "m", rarity: "c", atk: 5, hp: 3, desc: "燃烧吧!" },
-  { id: 12, name: "皇家狮鹫", emoji: "🦁", cost: 4, type: "m", rarity: "r", atk: 4, hp: 4, desc: "王室空中卫队。" },
-  { id: 13, name: "独角兽守卫", emoji: "🦄", cost: 5, type: "m", rarity: "r", atk: 5, hp: 5, desc: "圣洁之力。" },
-  { id: 14, name: "树人长老", emoji: "🌳", cost: 5, type: "m", rarity: "r", atk: 4, hp: 6, taunt: 1, desc: "森林的守望者。" },
-  { id: 15, name: "风暴巨人", emoji: "⛈️", cost: 6, type: "m", rarity: "e", atk: 6, hp: 6, desc: "雷霆之怒。" },
-  { id: 16, name: "城堡卫士", emoji: "🏰", cost: 6, type: "m", rarity: "e", atk: 5, hp: 7, taunt: 1, desc: "王城最后的防线。" },
-  { id: 17, name: "远古巨龙", emoji: "🐉", cost: 7, type: "m", rarity: "l", atk: 8, hp: 8, desc: "传说中的灾厄。" },
-  { id: 18, name: "闪电箭", emoji: "⚡", cost: 1, type: "s", rarity: "c", sp: { k: "dmg", n: 2, t: "any" }, desc: "造成 2 点伤害。" },
-  { id: 19, name: "力量祝福", emoji: "💪", cost: 1, type: "s", rarity: "c", sp: { k: "buff", a: 2, h: 0, t: "fm" }, desc: "使一个友方随从 +2 攻击力。" },
-  { id: 20, name: "寒冰箭", emoji: "❄️", cost: 2, type: "s", rarity: "c", sp: { k: "dmg", n: 3, t: "any" }, desc: "造成 3 点伤害。" },
-  { id: 21, name: "治疗之光", emoji: "✨", cost: 2, type: "s", rarity: "c", sp: { k: "heal", n: 6, t: "any" }, desc: "恢复 6 点生命值。" },
-  { id: 22, name: "奥术智慧", emoji: "📜", cost: 3, type: "s", rarity: "r", sp: { k: "draw", n: 2 }, desc: "抽两张牌。" },
-  { id: 23, name: "神圣新星", emoji: "🌟", cost: 3, type: "s", rarity: "r", sp: { k: "aoe", n: 2 }, desc: "对所有敌方随从造成 2 点伤害。" },
-  { id: 24, name: "王者祝福", emoji: "👑", cost: 4, type: "s", rarity: "r", sp: { k: "buff", a: 3, h: 3, t: "fm" }, desc: "使一个友方随从 +3/+3。" },
-  { id: 25, name: "火球术", emoji: "☄️", cost: 4, type: "s", rarity: "r", sp: { k: "dmg", n: 6, t: "any" }, desc: "造成 6 点伤害。" },
-  { id: 26, name: "烈焰风暴", emoji: "🌋", cost: 6, type: "s", rarity: "e", sp: { k: "aoe", n: 4 }, desc: "对所有敌方随从造成 4 点伤害。" },
-  { id: 27, name: "伊谢尔·风歌", emoji: "🧝‍♀️", cost: 9, type: "m", rarity: "l", atk: 5, hp: 5, aura: "cheapSpells", desc: "本随从在场时,你的所有法术牌费用变为(1)点。" },
-  { id: 28, name: "夜影花蕾", emoji: "🌺", cost: 8, type: "s", rarity: "e", sp: { k: "bloom" }, desc: "【抉择】从你的牌库随机 3 张随从牌中选 1 张召唤;或从随机 3 张法术牌中选 1 张施放。" },
-  { id: 29, name: "星夜露宿", emoji: "🏕️", cost: 8, type: "s", rarity: "e", sp: { k: "camp" }, desc: "【抉择三次】回复 3 个法力水晶;或抽两张牌;或获得 5 点护甲。" },
-  { id: 30, name: "星火术", emoji: "💫", cost: 6, type: "s", rarity: "r", sp: { k: "dmg", n: 5, t: "any", draw: 1 }, desc: "造成 5 点伤害,抽一张牌。" },
-  { id: 31, name: "鼓舞", emoji: "📯", cost: 2, type: "s", rarity: "c", sp: { k: "choose", opts: [{ fx: "draw", n: 1, emoji: "🃏", label: "抽一张牌" }, { fx: "manaEmpty", n: 1, emoji: "💠", label: "获得 1 个空的法力水晶" }] }, desc: "【抉择】抽一张牌;或获得 1 个空的法力水晶。" },
-  { id: 32, name: "滋养", emoji: "🌿", cost: 5, type: "s", rarity: "r", sp: { k: "choose", opts: [{ fx: "draw", n: 3, emoji: "🃏", label: "抽三张牌" }, { fx: "manaFull", n: 2, emoji: "💎", label: "获得 2 个法力水晶" }] }, desc: "【抉择】抽三张牌;或获得 2 个法力水晶。" },
-  { id: 33, name: "生物计划", emoji: "🧬", cost: 1, type: "s", rarity: "e", sp: { k: "bio" }, desc: "双方各获得 2 个法力水晶。" },
-  { id: 34, name: "终极感染", emoji: "🦠", cost: 10, type: "s", rarity: "e", sp: { k: "dmg", n: 5, t: "any", draw: 5, armor: 5, summon: 98 }, desc: "造成 5 点伤害,抽五张牌,获得 5 点护甲值,召唤一个 5/5 的食尸鬼。" },
-  { id: 35, name: "月光指引", emoji: "🌙", cost: 2, type: "s", rarity: "r", sp: { k: "moonlight" }, desc: "【发现】你牌库中的一张牌,获得其复制;如果你在本回合打出该复制,则从牌库抽取本体。" },
-  { id: 36, name: "魔法方碑", emoji: "🧿", cost: 1, type: "s", rarity: "r", sp: { k: "obelisk" }, desc: "本回合内,你的所有法术造成的伤害加 1。" },
-  { id: 37, name: "巴内斯", emoji: "🎭", cost: 5, type: "m", rarity: "l", atk: 3, hp: 4, bc: { k: "summonMini" }, desc: "【战吼】从你的牌库中随机召唤一个随从,其攻击力和生命值变为 1。" },
-];
-const COIN = { id: 99, name: "幸运币", emoji: "🪙", cost: 0, type: "s", rarity: "c", sp: { k: "coin" }, token: 1, desc: "在本回合获得一个法力水晶。" };
-const GHOUL = { id: 98, name: "食尸鬼", emoji: "🧟", cost: 5, type: "m", rarity: "c", atk: 5, hp: 5, token: 1, desc: "由「终极感染」召唤。" };
-const RARITY = { c: { label: "普通", color: "#cfd6dd" }, r: { label: "稀有", color: "#4da3ff" }, e: { label: "史诗", color: "#c478f0" }, l: { label: "传说", color: "#ffa726" } };
-const maxCopies = (c) => (c.rarity === "l" ? 1 : 2);
-const byId = {};
-POOL.forEach((c) => (byId[c.id] = c));
-byId[COIN.id] = COIN;
-byId[GHOUL.id] = GHOUL;
-const HAND_LIMIT = 10; // 手牌上限,超出时抽到的牌会被烧掉
-let UID = 1, FXID = 1;
+// 主菜单 / 牌组构建阶段没有对局数据;进入 play/over 后是完整 GameState
+interface LobbyState extends Partial<Omit<GameState, "phase">> {
+  phase: "menu" | "deck";
+}
+type UiGame = GameState | LobbyState;
 
-const clone = (o) => JSON.parse(JSON.stringify(o));
-const other = (s) => (s === "p" ? "a" : "p");
-const kw = (c) => `${c.taunt ? "【嘲讽】" : ""}${c.charge ? "【冲锋】" : ""}`;
-const spSummary = (sp, bonus = 0) => {
-  if (!sp) return "法术";
-  if (sp.k === "dmg") return bonus > 0 ? `伤害* ${sp.n + bonus} *` : `伤害 ${sp.n}`;
-  if (sp.k === "heal") return `治疗 ${sp.n}`;
-  if (sp.k === "buff") return `+${sp.a}/+${sp.h}`;
-  if (sp.k === "draw") return `抽 ${sp.n} 张`;
-  if (sp.k === "aoe") return bonus > 0 ? `全体* ${sp.n + bonus} *` : `全体 ${sp.n}`;
-  if (sp.k === "coin") return "+1 法力";
-  if (sp.k === "bloom") return "抉择";
-  if (sp.k === "camp") return "抉择×3";
-  if (sp.k === "choose") return "抉择";
-  if (sp.k === "bio") return "双方+2水晶";
-  if (sp.k === "moonlight") return "发现";
-  if (sp.k === "obelisk") return "法伤+1";
-  return "法术";
-};
-// 法伤加成生效时,牌面描述中的伤害数字改为 * n * 形式(如 +1 法伤的闪电箭显示"造成* 3 *点伤害")
-const cardDesc = (c, bonus = 0) =>
-  c.sp && bonus > 0 && (c.sp.k === "dmg" || c.sp.k === "aoe")
-    ? c.desc.replace(` ${c.sp.n} 点伤害`, `* ${c.sp.n + bonus} *点伤害`)
-    : c.desc;
-
-function shuffle(deck) {
-  for (let i = deck.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [deck[i], deck[j]] = [deck[j], deck[i]];
-  }
-  return deck;
-}
-function buildDeck() {
-  const counts = {}, deck = [];
-  while (deck.length < 30) {
-    const c = POOL[Math.floor(Math.random() * POOL.length)];
-    if ((counts[c.id] || 0) >= maxCopies(c)) continue;
-    counts[c.id] = (counts[c.id] || 0) + 1;
-    deck.push(c.id);
-  }
-  return shuffle(deck);
-}
-function loadPlayerDeck() {
-  try {
-    const d = JSON.parse(localStorage.getItem("arcane-deck") || "null");
-    if (!Array.isArray(d) || d.length !== 30) return null;
-    const counts = {};
-    for (const id of d) {
-      const c = byId[id];
-      if (!c || c.token) return null;
-      counts[id] = (counts[id] || 0) + 1;
-      if (counts[id] > maxCopies(c)) return null;
-    }
-    return d;
-  } catch {
-    return null;
-  }
-}
-
-// ================= 规则引擎 =================
-function fx(st, key, text, color) {
-  st.fx.push({ id: FXID++, key, text, color, ts: Date.now() });
-}
-function log(st, text, important = false) {
-  st.lastLog = text;
-  if (!st.logs) st.logs = [];
-  st.logs.push({ id: FXID++, turn: Math.max(1, st.turnNum), text, important: !!important });
-  if (st.logs.length > 50) st.logs.shift();
-}
-function notice(st, text) {
-  st.notice = { text, id: FXID++ };
-}
-function dmgHero(st, side, n) {
-  const h = st[side];
-  let rest = n;
-  if (h.armor > 0) {
-    const ab = Math.min(h.armor, rest);
-    h.armor -= ab;
-    rest -= ab;
-  }
-  if (rest > 0) h.hp -= rest;
-  fx(st, side + "-hero", "-" + n, "#ff6060");
-  if (h.hp <= 0) { h.hp = 0; st.winner = other(side); }
-}
-function dmgMinion(st, side, uid, n) {
-  const m = st[side].board.find((x) => x.uid === uid);
-  if (!m) return;
-  m.hp -= n;
-  fx(st, "m" + uid, "-" + n, "#ff6060");
-  if (m.hp <= 0) st[side].board = st[side].board.filter((x) => x.uid !== uid);
-}
-function draw(st, side, n) {
-  for (let k = 0; k < n; k++) {
-    const s = st[side];
-    const who = side === "p" ? "你" : "对手";
-    if (!s.deck.length) {
-      s.fatigue++;
-      dmgHero(st, side, s.fatigue);
-      log(st, who + `的牌库已空,受到 ${s.fatigue} 点疲劳伤害`, true);
-      notice(st, `🃏 ${who}的牌库已空,受到 ${s.fatigue} 点疲劳伤害!`);
-      continue;
-    }
-    const cid = s.deck.pop();
-    if (s.hand.length >= HAND_LIMIT) {
-      log(st, who + `的手牌已满,「${byId[cid].name}」被烧掉了`, true);
-      notice(st, `🔥 ${who}的手牌已满,「${byId[cid].name}」被烧掉了!`);
-      continue;
-    }
-    s.hand.push({ uid: UID++, cid });
-  }
-}
-function startTurn(st, side) {
-  const s = st[side];
-  st.p.spellDmg = 0;
-  st.a.spellDmg = 0;
-  s.maxMana = Math.min(10, s.maxMana + 1);
-  s.mana = s.maxMana;
-  s.board.forEach((m) => { m.sick = false; m.attacked = false; });
-  draw(st, side, 1);
-}
-function playMinion(st, side, i) {
-  const s = st[side];
-  if (!s) return false;
-  const en = s.hand[i];
-  if (!en) return false;
-  const c = byId[en.cid];
-  if (!c || c.type !== "m" || c.cost > s.mana || s.board.length >= 6) return false;
-  s.mana -= c.cost;
-  s.hand.splice(i, 1);
-  s.board.push({
-    uid: en.uid, cid: c.id, name: c.name, emoji: c.emoji,
-    atk: c.atk, hp: c.hp, maxHp: c.hp,
-    taunt: !!c.taunt, charge: !!c.charge, sick: !c.charge, attacked: false,
-  });
-  if (c.bc) doBattlecry(st, side, c);
-  moonTutor(st, side, en);
-  return true;
-}
-// 战吼:仅从手牌打出时触发(从牌库召唤不触发)
-function doBattlecry(st, side, c) {
-  if (c.bc.k === "summonMini") {
-    const s = st[side];
-    const pool = s.deck.filter((cid) => byId[cid].type === "m");
-    if (!pool.length || s.board.length >= 6) return;
-    const mc = byId[pool[Math.floor(Math.random() * pool.length)]];
-    s.board.push({
-      uid: UID++, cid: mc.id, name: mc.name, emoji: mc.emoji,
-      atk: 1, hp: 1, maxHp: 1,
-      taunt: !!mc.taunt, charge: !!mc.charge, sick: !mc.charge, attacked: false,
-    });
-    log(st, `「${c.name}」从牌库召唤了「${mc.name}」的 1/1 复制`);
-  }
-}
-// 月光指引:本回合内打出发现的复制,则从牌库定向抽取本体
-function moonTutor(st, side, en) {
-  if (!en || en.moon !== st.turnNum) return;
-  const s = st[side];
-  const i = s.deck.indexOf(en.cid);
-  if (i < 0) return;
-  const cid = s.deck.splice(i, 1)[0];
-  const who = side === "p" ? "你" : "对手";
-  if (s.hand.length >= HAND_LIMIT) {
-    log(st, `「月光指引」:${who}的手牌已满,本体「${byId[cid].name}」被烧掉了`, true);
-    return;
-  }
-  s.hand.push({ uid: UID++, cid });
-  log(st, `「月光指引」:${who}打出了复制,从牌库抽取了本体「${byId[cid].name}」`);
-}
-function gainMoonCopy(st, side, cid) {
-  const s = st[side];
-  if (s.hand.length >= HAND_LIMIT) {
-    log(st, `${side === "p" ? "你" : "对手"}的手牌已满,「${byId[cid].name}」的复制被烧掉了`, true);
-    return;
-  }
-  s.hand.push({ uid: UID++, cid, moon: st.turnNum });
-}
-function sampleDeckAny(st, side) {
-  const cids = [...new Set(st[side].deck)];
-  shuffle(cids);
-  return cids.slice(0, 3);
-}
-
-const effCost = (st, side, c) =>
-  c.type === "s" && st[side].board.some((m) => (byId[m.cid] || {}).aura === "cheapSpells") ? Math.min(1, c.cost) : c.cost;
-function removeFromDeck(st, side, cid) {
-  const i = st[side].deck.indexOf(cid);
-  if (i >= 0) st[side].deck.splice(i, 1);
-}
-function sampleDeck(st, side, type) {
-  const idxs = [];
-  st[side].deck.forEach((cid, i) => {
-    const c = byId[cid];
-    if (c.type === type) idxs.push(i);
-  });
-  shuffle(idxs);
-  return idxs.slice(0, 3).map((i) => st[side].deck[i]);
-}
-function summonFromDeck(st, side, cid) {
-  const c = byId[cid];
-  if (!c || c.type !== "m" || st[side].board.length >= 6) return false;
-  st[side].board.push({
-    uid: UID++, cid: c.id, name: c.name, emoji: c.emoji,
-    atk: c.atk, hp: c.hp, maxHp: c.hp,
-    taunt: !!c.taunt, charge: !!c.charge, sick: !c.charge, attacked: false,
-  });
-  return true;
-}
-// 伤害法术的附加效果:抽牌、护甲、召唤衍生物(castSpell 与 castDeckSpell 共用)
-function dmgExtras(st, side, sp) {
-  if (sp.draw) draw(st, side, sp.draw);
-  if (sp.armor) {
-    const s = st[side];
-    s.armor = (s.armor || 0) + sp.armor;
-    fx(st, side + "-hero", `+${sp.armor}🛡`, "#bfd3e6");
-  }
-  if (sp.summon && summonFromDeck(st, side, sp.summon)) {
-    const t = byId[sp.summon];
-    log(st, `${side === "p" ? "你" : "对手"}召唤了一个 ${t.atk}/${t.hp} 的「${t.name}」`);
-  }
-}
-// 从牌库直接施放的法术自动选择目标;抉择类法术由系统随机选择选项
-function castDeckSpell(st, side, cid) {
-  const c = byId[cid];
-  if (!c || !c.sp) return;
-  const sp = c.sp;
-  const e = other(side);
-  const bonus = st[side].spellDmg || 0;
-  if (sp.k === "dmg") {
-    const n = sp.n + bonus;
-    const tgts = st[e].board.map((m) => ({ uid: m.uid }));
-    tgts.push({ hero: true });
-    const t = tgts[Math.floor(Math.random() * tgts.length)];
-    if (t.hero) dmgHero(st, e, n);
-    else dmgMinion(st, e, t.uid, n);
-    dmgExtras(st, side, sp);
-  } else if (sp.k === "heal") {
-    const h = st[side];
-    h.hp = Math.min(30, h.hp + sp.n);
-    fx(st, side + "-hero", "+" + sp.n, "#5ef08a");
-  } else if (sp.k === "buff") {
-    const board = st[side].board;
-    if (board.length) {
-      const m = [...board].sort((a, b) => b.atk + b.hp - (a.atk + a.hp))[0];
-      m.atk += sp.a; m.hp += sp.h; m.maxHp += sp.h;
-      fx(st, "m" + m.uid, `+${sp.a}/+${sp.h}`, "#ffd700");
-    }
-  } else if (sp.k === "draw") {
-    draw(st, side, sp.n);
-  } else if (sp.k === "aoe") {
-    st[e].board.map((m) => m.uid).forEach((u) => dmgMinion(st, e, u, sp.n + bonus));
-  } else if (sp.k === "bio") {
-    gainMana(st, side, 2);
-    gainMana(st, e, 2);
-  } else if (sp.k === "obelisk") {
-    st[side].spellDmg = bonus + 1;
-    fx(st, side + "-hero", "法伤+1", "#c478f0");
-  } else if (sp.k === "moonlight") {
-    const opts = sampleDeckAny(st, side);
-    if (opts.length) {
-      const pick = opts[Math.floor(Math.random() * opts.length)];
-      gainMoonCopy(st, side, pick);
-      log(st, `「${c.name}」(随机)发现了「${byId[pick].name}」的复制`);
-    }
-  } else if (sp.k === "choose") {
-    const o = sp.opts[Math.floor(Math.random() * sp.opts.length)];
-    applyOpt(st, side, o);
-    log(st, `「${c.name}」(随机)抉择了${o.label}`);
-  } else if (sp.k === "camp") {
-    const picked = [];
-    for (let k = 0; k < 3; k++) {
-      const o = ["mana", "draw", "armor"][Math.floor(Math.random() * 3)];
-      campEffect(st, side, o);
-      picked.push(campLabel(o));
-    }
-    log(st, `「${c.name}」(随机)抉择了:${picked.join("、")}`);
-  } else if (sp.k === "bloom") {
-    const mOk = st[side].board.length < 6 && st[side].deck.some((x) => byId[x].type === "m");
-    const sOk = st[side].deck.some((x) => byId[x].type === "s");
-    const modes = [mOk && "m", sOk && "s"].filter(Boolean);
-    if (!modes.length) return;
-    const mode = modes[Math.floor(Math.random() * modes.length)];
-    const picks = sampleDeck(st, side, mode);
-    const pick = picks[Math.floor(Math.random() * picks.length)];
-    removeFromDeck(st, side, pick);
-    if (mode === "m") {
-      log(st, `「${c.name}」(随机)从牌库召唤了「${byId[pick].name}」`);
-      summonFromDeck(st, side, pick);
-    } else {
-      log(st, `「${c.name}」(随机)从牌库施放了「${byId[pick].name}」`);
-      castDeckSpell(st, side, pick);
-    }
-  }
-}
-function gainMana(st, side, n, empty = false) {
-  const s = st[side];
-  s.maxMana = Math.min(10, s.maxMana + n);
-  if (!empty) s.mana = Math.min(10, s.mana + n);
-  fx(st, side + "-hero", `+${n}${empty ? "💠" : "💎"}`, "#7cc4ff");
-}
-function applyOpt(st, side, o) {
-  if (o.fx === "draw") draw(st, side, o.n);
-  else if (o.fx === "manaEmpty") gainMana(st, side, o.n, true);
-  else if (o.fx === "manaFull") gainMana(st, side, o.n);
-}
-const campLabel = (o) => (o === "mana" ? "回复 3 个法力水晶" : o === "draw" ? "抽两张牌" : "获得 5 点护甲");
-function campEffect(st, side, opt) {
-  const s = st[side];
-  if (opt === "mana") s.mana = Math.min(s.maxMana, s.mana + 3);
-  else if (opt === "draw") draw(st, side, 2);
-  else if (opt === "armor") { s.armor = (s.armor || 0) + 5; fx(st, side + "-hero", "+5🛡", "#bfd3e6"); }
-}
-
-function isValidSpellTarget(st, side, sp, tgt) {
-  if (!sp) return false;
-  const caster = st[side];
-  if (!caster) return false;
-  if (sp.k === "draw" || sp.k === "aoe" || sp.k === "coin" || sp.k === "bio" || sp.k === "obelisk") return !tgt;
-  if (!tgt) return false;
-  if (sp.t === "fm") return tgt.side === side && !!tgt.uid && !!caster.board.find((m) => m.uid === tgt.uid);
-  if (sp.t !== "any") return false;
-  const targetSide = st[tgt.side];
-  if (!targetSide) return false;
-  if (tgt.hero) return true;
-  return !!tgt.uid && !!targetSide.board.find((m) => m.uid === tgt.uid);
-}
-
-function castSpell(st, side, i, tgt) {
-  const s = st[side];
-  if (!s) return false;
-  const en = s.hand[i];
-  if (!en) return false;
-  const c = byId[en.cid];
-  if (!c) return false;
-  const sp = c.sp;
-  const cost = effCost(st, side, c);
-  if (!c || c.type !== "s" || cost > s.mana || !isValidSpellTarget(st, side, sp, tgt)) return false;
-  s.mana -= cost;
-  s.hand.splice(i, 1);
-  const bonus = s.spellDmg || 0;
-  if (sp.k === "dmg") {
-    const n = sp.n + bonus;
-    if (tgt.hero) dmgHero(st, tgt.side, n);
-    else dmgMinion(st, tgt.side, tgt.uid, n);
-    dmgExtras(st, side, sp);
-  } else if (sp.k === "heal") {
-    if (tgt.hero) {
-      const h = st[tgt.side];
-      h.hp = Math.min(30, h.hp + sp.n);
-      fx(st, tgt.side + "-hero", "+" + sp.n, "#5ef08a");
-    } else {
-      const m = st[tgt.side].board.find((x) => x.uid === tgt.uid);
-      if (m) { m.hp = Math.min(m.maxHp, m.hp + sp.n); fx(st, "m" + m.uid, "+" + sp.n, "#5ef08a"); }
-    }
-  } else if (sp.k === "buff") {
-    const m = st[tgt.side].board.find((x) => x.uid === tgt.uid);
-    if (m) { m.atk += sp.a; m.hp += sp.h; m.maxHp += sp.h; fx(st, "m" + m.uid, `+${sp.a}/+${sp.h}`, "#ffd700"); }
-  } else if (sp.k === "draw") {
-    draw(st, side, sp.n);
-  } else if (sp.k === "coin") {
-    s.mana = Math.min(10, s.mana + 1);
-    fx(st, side + "-hero", "+1💎", "#7cc4ff");
-  } else if (sp.k === "bio") {
-    gainMana(st, side, 2);
-    gainMana(st, other(side), 2);
-  } else if (sp.k === "obelisk") {
-    s.spellDmg = bonus + 1;
-    fx(st, side + "-hero", "法伤+1", "#c478f0");
-  } else if (sp.k === "aoe") {
-    const e = other(side);
-    st[e].board.map((m) => m.uid).forEach((u) => dmgMinion(st, e, u, sp.n + bonus));
-  }
-  moonTutor(st, side, en);
-  return true;
-}
-function resolveAttack(st, side, auid, tgt) {
-  if (!tgt) return false;
-  const attacker = st[side];
-  const e = other(side);
-  const defender = st[e];
-  if (!attacker || !defender) return false;
-  const A = attacker.board.find((m) => m.uid === auid);
-  if (!A || A.sick || A.attacked || A.atk <= 0) return false;
-  const taunts = defender.board.filter((m) => m.taunt);
-  if (tgt.hero) {
-    if (taunts.length) return false;
-    A.attacked = true;
-    dmgHero(st, e, A.atk);
-    return true;
-  }
-  const D = defender.board.find((m) => m.uid === tgt.uid);
-  if (!D || (taunts.length && !D.taunt)) return false;
-  A.attacked = true;
-  const dAtk = D.atk;
-  dmgMinion(st, e, D.uid, A.atk);
-  dmgMinion(st, side, A.uid, dAtk);
-  return true;
-}
-
-// ================= AI 对手 =================
-function aiPlay(st) {
-  const A = st.a, P = st.p;
-  const hand = A.hand.map((e, i) => ({ i, c: byId[e.cid] }));
-  const can = hand.filter((h) => effCost(st, "a", h.c) <= A.mana);
-  if (!can.length) return false;
-  const dmg = can.filter((h) => h.c.sp && h.c.sp.k === "dmg").sort((x, y) => y.c.sp.n - x.c.sp.n);
-  const bonus = A.spellDmg || 0;
-  // 魔法方碑:有伤害法术可跟进时先开碑
-  const obe = can.find((h) => h.c.sp && h.c.sp.k === "obelisk");
-  if (obe && can.some((h) => h.c.sp && (h.c.sp.k === "dmg" || h.c.sp.k === "aoe") && effCost(st, "a", h.c) <= A.mana - effCost(st, "a", obe.c))) {
-    if (castSpell(st, "a", obe.i, null)) {
-      log(st, `对手施放了「${obe.c.name}」,本回合法术伤害 +1`);
-      return true;
-    }
-  }
-  // 斩杀
-  for (const h of dmg) {
-    if (h.c.sp.n + bonus >= P.hp + (P.armor || 0)) {
-      if (castSpell(st, "a", h.i, { side: "p", hero: true })) {
-        log(st, `对手使用「${h.c.name}」直击你的英雄!`);
-        return true;
-      }
-    }
-  }
-  // 群体清场
-  const aoe = can.filter((h) => h.c.sp && h.c.sp.k === "aoe").sort((x, y) => y.c.sp.n - x.c.sp.n);
-  if (aoe.length && P.board.length >= 3) {
-    if (castSpell(st, "a", aoe[0].i, null)) {
-      log(st, `对手施放了「${aoe[0].c.name}」`);
-      return true;
-    }
-  }
-  // 点杀大威胁
-  if (dmg.length && P.board.length) {
-    const th = [...P.board].sort((a, b) => b.atk * 2 + b.hp - (a.atk * 2 + a.hp))[0];
-    if (th.atk >= 3) {
-      const eff = [...dmg].reverse().find((h) => h.c.sp.n + bonus >= th.hp);
-      if (eff) {
-        if (castSpell(st, "a", eff.i, { side: "p", uid: th.uid })) {
-          log(st, `对手对「${th.name}」使用了「${eff.c.name}」`);
-          return true;
-        }
-      }
-    }
-  }
-  // 治疗
-  const heal = can.find((h) => h.c.sp && h.c.sp.k === "heal");
-  if (heal && A.hp <= 20) {
-    if (castSpell(st, "a", heal.i, { side: "a", hero: true })) {
-      log(st, `对手使用「${heal.c.name}」恢复了生命`);
-      return true;
-    }
-  }
-  // 夜影花蕾:优先召唤随从,否则施放法术
-  const bloom = can.find((h) => h.c.sp && h.c.sp.k === "bloom");
-  if (bloom) {
-    const mOk = A.board.length < 6 && A.deck.some((cid) => byId[cid].type === "m");
-    const sOk = A.deck.some((cid) => byId[cid].type === "s");
-    if (mOk || sOk) {
-      const en2 = A.hand[bloom.i];
-      A.mana -= effCost(st, "a", bloom.c);
-      A.hand.splice(bloom.i, 1);
-      moonTutor(st, "a", en2);
-      if (mOk) {
-        const pick = sampleDeck(st, "a", "m").sort((x, y) => byId[y].cost - byId[x].cost)[0];
-        removeFromDeck(st, "a", pick);
-        log(st, `对手的「夜影花蕾」从牌库召唤了「${byId[pick].name}」`);
-        summonFromDeck(st, "a", pick);
-      } else {
-        const pick = sampleDeck(st, "a", "s")[0];
-        removeFromDeck(st, "a", pick);
-        log(st, `对手的「夜影花蕾」从牌库施放了「${byId[pick].name}」`);
-        castDeckSpell(st, "a", pick);
-      }
-      return true;
-    }
-  }
-  // 星夜露宿:按局势抉择三次
-  const camp = can.find((h) => h.c.sp && h.c.sp.k === "camp");
-  if (camp) {
-    const en2 = A.hand[camp.i];
-    A.mana -= effCost(st, "a", camp.c);
-    A.hand.splice(camp.i, 1);
-    moonTutor(st, "a", en2);
-    const picked = [];
-    for (let k = 0; k < 3; k++) {
-      const opt = A.hp + (A.armor || 0) <= 24 ? "armor" : A.hand.length <= 6 ? "draw" : "mana";
-      campEffect(st, "a", opt);
-      picked.push(campLabel(opt));
-    }
-    log(st, `对手施放「星夜露宿」,抉择了:${picked.join("、")}`);
-    return true;
-  }
-  // 鼓舞/滋养类抉择:法力未满时优先涨水晶,否则抽牌
-  const chooser = can.find((h) => h.c.sp && h.c.sp.k === "choose");
-  if (chooser) {
-    const opts = chooser.c.sp.opts;
-    const manaOpt = opts.find((o) => o.fx === "manaEmpty" || o.fx === "manaFull");
-    const drawOpt = opts.find((o) => o.fx === "draw");
-    const pick = A.maxMana < 10 && A.hand.length > 2 && manaOpt ? manaOpt : drawOpt || manaOpt || opts[0];
-    const en2 = A.hand[chooser.i];
-    A.mana -= effCost(st, "a", chooser.c);
-    A.hand.splice(chooser.i, 1);
-    moonTutor(st, "a", en2);
-    applyOpt(st, "a", pick);
-    log(st, `对手施放「${chooser.c.name}」,抉择了${pick.label}`);
-    return true;
-  }
-  // 生物计划:法力未满时铺水晶
-  const bio = can.find((h) => h.c.sp && h.c.sp.k === "bio");
-  if (bio && A.maxMana < 10) {
-    if (castSpell(st, "a", bio.i, null)) {
-      log(st, `对手施放了「${bio.c.name}」,双方各获得 2 个法力水晶`);
-      return true;
-    }
-  }
-  // 幸运币:恰好能解锁一张差 1 费的牌时使用
-  const coin = can.find((h) => h.c.sp && h.c.sp.k === "coin");
-  if (coin && A.mana < 10 && hand.some((h) => effCost(st, "a", h.c) === A.mana + 1)) {
-    if (castSpell(st, "a", coin.i, null)) {
-      log(st, "对手使用了「幸运币」");
-      return true;
-    }
-  }
-  // 月光指引:发现费用最高的牌
-  const moon = can.find((h) => h.c.sp && h.c.sp.k === "moonlight");
-  if (moon && A.deck.length && A.hand.length < HAND_LIMIT) {
-    const en2 = A.hand[moon.i];
-    A.mana -= effCost(st, "a", moon.c);
-    A.hand.splice(moon.i, 1);
-    moonTutor(st, "a", en2);
-    const pick = sampleDeckAny(st, "a").sort((x, y) => byId[y].cost - byId[x].cost)[0];
-    gainMoonCopy(st, "a", pick);
-    log(st, `对手施放「${moon.c.name}」,发现了一张牌的复制`);
-    return true;
-  }
-  // 铺随从(优先大体格)
-  const mins = can.filter((h) => h.c.type === "m").sort((x, y) => y.c.cost - x.c.cost || y.c.atk - x.c.atk);
-  if (mins.length && A.board.length < 6) {
-    if (playMinion(st, "a", mins[0].i)) {
-      log(st, `对手打出了「${mins[0].c.name}」`);
-      return true;
-    }
-  }
-  // 强化
-  const bf = can.find((h) => h.c.sp && h.c.sp.k === "buff");
-  if (bf && A.board.length) {
-    const m = [...A.board].sort((a, b) => b.atk + b.hp - (a.atk + a.hp))[0];
-    if (castSpell(st, "a", bf.i, { side: "a", uid: m.uid })) {
-      log(st, `对手对「${m.name}」使用了「${bf.c.name}」`);
-      return true;
-    }
-  }
-  // 抽牌
-  const dr = can.find((h) => h.c.sp && h.c.sp.k === "draw");
-  if (dr && A.hand.length <= 5 && A.deck.length > 2) {
-    if (castSpell(st, "a", dr.i, null)) {
-      log(st, `对手使用了「${dr.c.name}」`);
-      return true;
-    }
-  }
-  // 残局烧脸
-  if (dmg.length && P.hp <= 15) {
-    if (castSpell(st, "a", dmg[0].i, { side: "p", hero: true })) {
-      log(st, `对手使用「${dmg[0].c.name}」攻击你的英雄`);
-      return true;
-    }
-  }
-  return false;
-}
-function aiAttack(st) {
-  const ready = st.a.board.filter((m) => !m.sick && !m.attacked && m.atk > 0);
-  if (!ready.length) return false;
-  const m = ready[0];
-  const taunts = st.p.board.filter((x) => x.taunt);
-  let tgt = null, tname = "";
-  if (taunts.length) {
-    const t =
-      taunts.find((t) => m.atk >= t.hp && t.atk < m.hp) ||
-      taunts.find((t) => m.atk >= t.hp) ||
-      [...taunts].sort((a, b) => a.hp - b.hp)[0];
-    tgt = { uid: t.uid }; tname = t.name;
-  } else {
-    const total = ready.reduce((s, x) => s + x.atk, 0);
-    if (total >= st.p.hp + (st.p.armor || 0)) tgt = { hero: true };
-    else {
-      const good = st.p.board.filter(
-        (t) => m.atk >= t.hp && (t.atk >= 3 || t.atk + t.hp >= m.atk + m.hp) && (t.atk < m.hp || t.atk + t.hp > m.atk + m.hp)
-      );
-      if (good.length) {
-        const t = good.sort((a, b) => b.atk + b.hp - (a.atk + a.hp))[0];
-        tgt = { uid: t.uid }; tname = t.name;
-      } else tgt = { hero: true };
-    }
-  }
-  if (!resolveAttack(st, "a", m.uid, tgt)) return false;
-  log(st, `对手的「${m.name}」攻击了${tgt.hero ? "你的英雄" : `「${tname}」`}`);
-  return true;
-}
-function computeAiTurn(b) {
-  const snaps = [];
-  let st = clone(b);
-  const push = () => snaps.push(clone(st));
-  st.fx = [];
-  startTurn(st, "a");
-  if (!st.winner) log(st, "对手抽了一张牌");
-  push();
-  if (st.winner) return snaps;
-  let g = 0;
-  while (g++ < 12 && !st.winner) { st.fx = []; if (!aiPlay(st)) break; push(); }
-  g = 0;
-  while (g++ < 12 && !st.winner) { st.fx = []; if (!aiAttack(st)) break; push(); }
-  return snaps;
-}
-
-function initGame(playerDeck = null) {
-  const first = Math.random() < 0.5 ? "p" : "a";
-  const second = other(first);
-  const st = {
-    phase: "play", turn: first, first, turnNum: first === "p" ? 1 : 0, winner: null, fx: [], logs: [], notice: null, pending: null,
-    lastLog: "",
-    banner: { text: first === "p" ? "你是先手!" : "对手先手", id: Date.now() },
-    p: { hp: 30, armor: 0, mana: 0, maxMana: 0, fatigue: 0, spellDmg: 0, deck: playerDeck ? shuffle([...playerDeck]) : buildDeck(), hand: [], board: [] },
-    a: { hp: 30, armor: 0, mana: 0, maxMana: 0, fatigue: 0, spellDmg: 0, deck: buildDeck(), hand: [], board: [] },
-  };
-  log(st, first === "p"
-    ? "你获得先手!点击手牌查看,再次点击打出。"
-    : "对手获得先手,你作为后手多抽一张牌并获得「幸运币」。");
-  draw(st, first, 3);
-  draw(st, second, 4);
-  st[second].hand.push({ uid: UID++, cid: COIN.id });
-  if (first === "p") startTurn(st, "p");
-  return st;
-}
-
-const CSS = `
-@keyframes fUp{0%{opacity:1;transform:translate(-50%,0) scale(1.25)}100%{opacity:0;transform:translate(-50%,-36px) scale(.9)}}
-@keyframes pulseR{0%,100%{box-shadow:0 0 0 3px rgba(248,80,80,.95),0 0 14px rgba(248,80,80,.8)}50%{box-shadow:0 0 0 2px rgba(248,80,80,.45),0 0 5px rgba(248,80,80,.35)}}
-@keyframes banner{0%{opacity:0;transform:scale(.5)}18%{opacity:1;transform:scale(1.08)}32%{transform:scale(1)}70%{opacity:1}100%{opacity:0;transform:scale(1.02)}}
-@keyframes noticeFx{0%{opacity:0;transform:translateY(12px)}10%{opacity:1;transform:translateY(0)}80%{opacity:1}100%{opacity:0}}
-`;
-
-// ================= 展示组件(模块顶层,避免每次渲染重挂载导致 transition 失效) =================
-const Badge = ({ pos, v, bg }) => (
-  <span style={{ position: "absolute", bottom: -7, [pos === "bl" ? "left" : "right"]: -7, width: 22, height: 22, borderRadius: "50%", background: bg, border: "2px solid #e7cf8e", color: "#fff", fontSize: 12, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", textShadow: "0 1px 2px #000", zIndex: 5 }}>
-    {v}
-  </span>
-);
-
-const MinionEl = ({ side, m, myTurn, selAtk, isT, clickEntity, floats }) => {
-  const mine = side === "p";
-  const ready = mine && myTurn && !m.sick && !m.attacked;
-  const sel = selAtk === m.uid;
-  const tgt = isT(side, m.uid);
-  return (
-    <div
-      onClick={(e) => { e.stopPropagation(); clickEntity(side, m.uid); }}
-      style={{
-        width: 58, height: 74, borderRadius: m.taunt ? 18 : 10, position: "relative", cursor: "pointer", flexShrink: 0,
-        background: mine ? "linear-gradient(160deg,#6b5430,#41331a)" : "linear-gradient(160deg,#4a3354,#2c1d33)",
-        border: m.taunt ? "3px solid #9aa5b1" : "2px solid " + (mine ? "#c9a85a" : "#8a6da8"),
-        boxShadow: tgt ? "none" : sel ? "0 0 0 3px #ffd700,0 0 14px #ffd700" : ready ? "0 0 10px rgba(80,220,100,.85),0 0 0 2px rgba(80,220,100,.6)" : "0 2px 5px rgba(0,0,0,.5)",
-        animation: tgt ? "pulseR 1s infinite" : "none",
-        display: "flex", alignItems: "center", justifyContent: "center",
-      }}
-    >
-      <span style={{ fontSize: 26 }}>{m.emoji}</span>
-      {m.taunt && <span style={{ position: "absolute", top: -9, left: "50%", transform: "translateX(-50%)", fontSize: 11 }}>🛡️</span>}
-      {m.charge && <span style={{ position: "absolute", top: 2, right: 3, fontSize: 9 }}>⚡</span>}
-      {m.sick && mine && <span style={{ position: "absolute", top: 2, left: 3, fontSize: 9 }}>💤</span>}
-      <Badge pos="bl" v={m.atk} bg="#b8860b" />
-      <Badge pos="br" v={m.hp} bg={m.hp < m.maxHp ? "#dc2626" : "#7f1d1d"} />
-      {floats("m" + m.uid)}
-    </div>
-  );
-};
-
-const HeroEl = ({ side, h, isT, clickEntity, floats }) => {
-  const tgt = isT(side, null);
-  return (
-    <div
-      onClick={(e) => { e.stopPropagation(); clickEntity(side, null); }}
-      style={{ position: "relative", display: "flex", alignItems: "center", gap: 8, cursor: "pointer", padding: "4px 10px", borderRadius: 12, background: "rgba(0,0,0,.28)", border: "2px solid " + (side === "p" ? "#d9b85c" : "#a06bc4"), animation: tgt ? "pulseR 1s infinite" : "none" }}
-    >
-      <span style={{ fontSize: 30 }}>{side === "p" ? "🤴" : "💀"}</span>
-      <div>
-        <div style={{ fontSize: 12, fontWeight: 700, color: "#f4e6c1", whiteSpace: "nowrap" }}>{side === "p" ? "圣辉骑士(你)" : "死灵领主"}</div>
-        <div style={{ fontSize: 15, fontWeight: 900, color: "#ff8585" }}>
-          ❤️ {h.hp}
-          {h.armor > 0 && <span style={{ color: "#bfd3e6", marginLeft: 6 }}>🛡️ {h.armor}</span>}
-        </div>
-      </div>
-      {floats(side + "-hero")}
-    </div>
-  );
-};
-
-const HandCard = ({ en, i, selHand, mana, myTurn, handleHand, setHovHand, cost, bonus }) => {
-  const c = byId[en.cid];
-  const sel = selHand === i;
-  const afford = cost <= mana && myTurn;
-  const discounted = cost < c.cost;
-  return (
-    <div
-      onClick={(e) => { e.stopPropagation(); handleHand(i); }}
-      onMouseEnter={() => setHovHand(i)}
-      style={{
-        width: "clamp(54px,13.5vw,68px)", height: "clamp(80px,19vw,96px)", marginLeft: i === 0 ? 0 : "-10px",
-        borderRadius: 9, position: "relative", cursor: "pointer", flexShrink: 0,
-        transform: sel ? "translateY(-16px) scale(1.12)" : "none", transition: "transform .15s",
-        zIndex: sel ? 40 : 10 + i,
-        background: c.type === "m" ? "linear-gradient(170deg,#7a5c33,#4a3517 70%)" : "linear-gradient(170deg,#3d4f8a,#23284e 70%)",
-        border: sel ? "2px solid #ffd700" : "2px solid " + (c.type === "m" ? "#caa45c" : "#7d90d8"),
-        boxShadow: sel ? "0 6px 16px rgba(0,0,0,.6),0 0 12px rgba(255,215,0,.5)" : "0 3px 6px rgba(0,0,0,.55)",
-        filter: afford ? "none" : "grayscale(.7) brightness(.72)",
-        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2, padding: "4px 2px",
-      }}
-    >
-      <span style={{ position: "absolute", top: -6, left: -6, width: 20, height: 20, borderRadius: "50%", background: discounted ? "radial-gradient(circle at 35% 30%,#b9f2c4,#1f9c44 60%,#0b5e26)" : "radial-gradient(circle at 35% 30%,#9fd6ff,#1f63c4 60%,#0b3a7e)", border: "2px solid " + (discounted ? "#d6f5dc" : "#cfe6ff"), color: "#fff", fontSize: 11, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 5 }}>
-        {cost}
-      </span>
-      <span style={{ fontSize: 22, lineHeight: 1 }}>{c.emoji}</span>
-      <span style={{ fontSize: 9, color: c.rarity === "c" ? "#f7ecd2" : RARITY[c.rarity].color, fontWeight: 700, textAlign: "center", lineHeight: 1.15, textShadow: "0 1px 2px #000" }}>{c.name}</span>
-      {c.type === "m" ? (
-        <>
-          <Badge pos="bl" v={c.atk} bg="#b8860b" />
-          <Badge pos="br" v={c.hp} bg="#7f1d1d" />
-        </>
-      ) : (
-        <span style={{ fontSize: 9, color: "#aebdf2", fontWeight: 700 }}>{spSummary(c.sp, bonus)}</span>
-      )}
-      {(c.taunt || c.charge) && <span style={{ position: "absolute", top: 2, right: 2, fontSize: 9 }}>{c.taunt ? "🛡️" : "⚡"}</span>}
-    </div>
-  );
-};
-
-// ================= 组件 =================
 export default function ArcaneThrone() {
-  const [game, setGame] = useState({ phase: "menu" });
-  const [selHand, setSelHand] = useState(null);
-  const [selAtk, setSelAtk] = useState(null);
-  const [hint, setHint] = useState(null);
-  const [hovHand, setHovHand] = useState(null);
-  const [inspect, setInspect] = useState(null);
+  const [game, setGame] = useState<UiGame>({ phase: "menu" });
+  const [selHand, setSelHand] = useState<number | null>(null);
+  const [selAtk, setSelAtk] = useState<number | null>(null);
+  const [hint, setHint] = useState<{ t: string; id: number } | null>(null);
+  const [hovHand, setHovHand] = useState<number | null>(null);
+  const [inspect, setInspect] = useState<{ side: Side; uid: number } | null>(null);
   const [showLog, setShowLog] = useState(false);
   const [confirmSurrender, setConfirmSurrender] = useState(false);
-  const [playerDeck, setPlayerDeck] = useState(loadPlayerDeck);
-  const [deckSel, setDeckSel] = useState([]);
+  const [playerDeck, setPlayerDeck] = useState<number[] | null>(loadPlayerDeck);
+  const [deckSel, setDeckSel] = useState<number[]>([]);
   const gameRef = useRef(game);
-  const timers = useRef([]);
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   useEffect(() => { gameRef.current = game; }, [game]);
   useEffect(() => () => timers.current.forEach(clearTimeout), []);
@@ -818,14 +47,21 @@ export default function ArcaneThrone() {
   }, [hint]);
   useEffect(() => {
     if (game.phase === "play" && game.winner) {
-      const t = setTimeout(() => setGame((g) => (g.phase === "play" ? { ...g, phase: "over" } : g)), 900);
+      const t = setTimeout(() => setGame((g) => (g.phase === "play" ? { ...g, phase: "over" as const } : g)), 900);
       return () => clearTimeout(t);
     }
   }, [game.winner, game.phase]);
 
-  const T = (fn, ms) => timers.current.push(setTimeout(fn, ms));
+  const T = (fn: () => void, ms: number) => timers.current.push(setTimeout(fn, ms));
   const myTurn = game.phase === "play" && game.turn === "p" && !game.winner;
-  const mutate = (fn) => setGame((g) => { const st = clone(g); fn(st); return st; });
+  // 状态更新统一走 mutate:深拷贝当前 state → fn 内用引擎函数修改 → setGame
+  const mutate = (fn: (st: GameState) => void) =>
+    setGame((g) => {
+      if (g.phase === "menu" || g.phase === "deck") return g;
+      const st = clone(g);
+      fn(st);
+      return st;
+    });
 
   const start = () => {
     timers.current.forEach(clearTimeout);
@@ -838,7 +74,7 @@ export default function ArcaneThrone() {
     else setGame(st);
   };
 
-  function runAiTurn(base) {
+  function runAiTurn(base: GameState) {
     setGame(base);
     const snaps = computeAiTurn(base);
     snaps.forEach((s, i) => T(() => setGame(s), 750 * (i + 1)));
@@ -861,8 +97,8 @@ export default function ArcaneThrone() {
     setDeckSel(playerDeck ? [...playerDeck] : []);
     setGame({ phase: "deck" });
   };
-  const addCard = (id) => setDeckSel((d) => (d.length >= 30 || d.filter((x) => x === id).length >= maxCopies(byId[id]) ? d : [...d, id]));
-  const removeCard = (id) =>
+  const addCard = (id: number) => setDeckSel((d) => (d.length >= 30 || d.filter((x) => x === id).length >= maxCopies(byId[id]) ? d : [...d, id]));
+  const removeCard = (id: number) =>
     setDeckSel((d) => {
       const i = d.indexOf(id);
       if (i < 0) return d;
@@ -891,7 +127,7 @@ export default function ArcaneThrone() {
 
   // ---------- 抉择处理 ----------
   // 确认夜影花蕾的模式:此时才真正支付费用并移出手牌;翻开牌库的牌后(bloomPick)不可再取消
-  function pickBloomMode(mode) {
+  function pickBloomMode(mode: BloomMode) {
     mutate((st) => {
       const p = st.pending;
       if (!p || p.k !== "bloomMode") return;
@@ -905,7 +141,7 @@ export default function ArcaneThrone() {
       st.pending = { k: "bloomPick", mode, opts: sampleDeck(st, "p", mode) };
     });
   }
-  function pickBloomCard(idx) {
+  function pickBloomCard(idx: number) {
     mutate((st) => {
       const p = st.pending;
       if (!p || p.k !== "bloomPick") return;
@@ -922,7 +158,7 @@ export default function ArcaneThrone() {
       st.pending = null;
     });
   }
-  function pickCamp(opt) {
+  function pickCamp(opt: CampOpt) {
     mutate((st) => {
       const p = st.pending;
       if (!p || p.k !== "camp") return;
@@ -933,7 +169,7 @@ export default function ArcaneThrone() {
     });
   }
   // 确认抉择选项:此时才真正支付费用并移出手牌
-  function pickChoose(idx) {
+  function pickChoose(idx: number) {
     mutate((st) => {
       const p = st.pending;
       if (!p || p.k !== "choose") return;
@@ -957,7 +193,7 @@ export default function ArcaneThrone() {
       if (p && (p.k === "choose" || p.k === "bloomMode")) st.pending = null;
     });
   }
-  function pickMoon(idx) {
+  function pickMoon(idx: number) {
     mutate((st) => {
       const p = st.pending;
       if (!p || p.k !== "moonPick") return;
@@ -982,8 +218,8 @@ export default function ArcaneThrone() {
     });
   }
 
-  function handleHand(i) {
-    if (!myTurn || game.pending) return;
+  function handleHand(i: number) {
+    if (game.phase !== "play" || !myTurn || game.pending) return;
     const en = game.p.hand[i];
     if (!en) return;
     const c = byId[en.cid];
@@ -991,8 +227,8 @@ export default function ArcaneThrone() {
     if (selHand !== i) {
       setSelHand(i); setSelAtk(null);
       if (effCost(game, "p", c) > game.p.mana) setHint({ t: "法力水晶不足", id: Date.now() });
-      else if (c.sp && c.sp.t === "fm" && !game.p.board.length) setHint({ t: "场上没有可选目标", id: Date.now() });
-      else if (c.sp && (c.sp.t === "any" || c.sp.t === "fm")) setHint({ t: "点击目标施放法术", id: Date.now() });
+      else if (spTarget(c.sp) === "fm" && !game.p.board.length) setHint({ t: "场上没有可选目标", id: Date.now() });
+      else if (spTarget(c.sp)) setHint({ t: "点击目标施放法术", id: Date.now() });
       return;
     }
     if (effCost(game, "p", c) > game.p.mana) { setHint({ t: "法力水晶不足", id: Date.now() }); return; }
@@ -1019,7 +255,8 @@ export default function ArcaneThrone() {
       setSelHand(null); setHovHand(null);
     } else if (c.sp.k === "choose") {
       // 进入抉择界面时不扣费、不离手,确认选项时才结算(可取消)
-      mutate((st) => { st.pending = { k: "choose", i, name: c.name, emoji: c.emoji, opts: c.sp.opts }; });
+      const opts = c.sp.opts;
+      mutate((st) => { st.pending = { k: "choose", i, name: c.name, emoji: c.emoji, opts }; });
       setSelHand(null); setHovHand(null);
     } else if (c.sp.k === "moonlight") {
       if (!game.p.deck.length) { setHint({ t: "牌库已空,无法发现", id: Date.now() }); return; }
@@ -1032,25 +269,26 @@ export default function ArcaneThrone() {
         moonTutor(st, "p", en2);
       });
       setSelHand(null); setHovHand(null);
-    } else if (!(c.sp.t === "any" || c.sp.t === "fm")) {
+    } else if (!spTarget(c.sp)) {
       mutate((st) => { if (castSpell(st, "p", i, null)) log(st, `你施放了「${c.name}」`); });
       setSelHand(null); setHovHand(null);
     } else setHint({ t: "点击目标施放法术", id: Date.now() });
   }
 
-  function clickEntity(side, uid) {
-    if (game.pending) return;
+  function clickEntity(side: Side, uid: number | null) {
+    if (game.phase !== "play" || game.pending) return;
     if (!myTurn) {
       if (uid) setInspect({ side, uid });
       return;
     }
     const selCard = selHand != null && game.p.hand[selHand] ? byId[game.p.hand[selHand].cid] : null;
-    if (selCard && selCard.sp && (selCard.sp.t === "any" || selCard.sp.t === "fm") && effCost(game, "p", selCard) <= game.p.mana) {
-      if (selCard.sp.t === "fm" && (side !== "p" || !uid)) return;
-      const idx = selHand;
+    if (selCard && spTarget(selCard.sp) && effCost(game, "p", selCard) <= game.p.mana) {
+      if (spTarget(selCard.sp) === "fm" && (side !== "p" || !uid)) return;
+      const idx = selHand!;
+      const name = selCard.name;
       mutate((st) => {
         if (castSpell(st, "p", idx, uid ? { side, uid } : { side, hero: true })) {
-          log(st, `你施放了「${selCard.name}」`);
+          log(st, `你施放了「${name}」`);
         }
       });
       setSelHand(null); setInspect(null);
@@ -1077,10 +315,11 @@ export default function ArcaneThrone() {
         const t = game.a.board.find((x) => x.uid === uid);
         if (!t) return;
         if (taunts.length && !t.taunt) { setHint({ t: "必须先攻击带 🛡️ 嘲讽的随从", id: Date.now() }); return; }
+        const tname = t.name;
         mutate((st) => {
           const A = st.p.board.find((x) => x.uid === a);
           if (resolveAttack(st, "p", a, { uid })) {
-            log(st, `你的「${A ? A.name : "随从"}」攻击了「${t.name}」`);
+            log(st, `你的「${A ? A.name : "随从"}」攻击了「${tname}」`);
           }
         });
       } else {
@@ -1099,7 +338,9 @@ export default function ArcaneThrone() {
   function endTurn() {
     if (!myTurn || game.pending) return;
     setSelHand(null); setSelAtk(null); setInspect(null); setHovHand(null);
-    const base = clone(gameRef.current);
+    const cur = gameRef.current;
+    if (cur.phase !== "play") return;
+    const base = clone(cur);
     base.turn = "a";
     base.banner = { text: "对手回合", id: Date.now() };
     log(base, "对手回合开始");
@@ -1107,43 +348,13 @@ export default function ArcaneThrone() {
     runAiTurn(base);
   }
 
-  // ---------- 渲染辅助 ----------
-  const floats = (key) =>
-    (game.fx || [])
-      .filter((f) => f.key === key)
-      .map((f) => (
-        <span key={f.id} style={{ position: "absolute", left: "50%", top: -4, transform: "translateX(-50%)", color: f.color, fontWeight: 900, fontSize: 18, textShadow: "0 1px 3px #000", animation: "fUp 1s ease-out forwards", pointerEvents: "none", zIndex: 60, whiteSpace: "nowrap" }}>
-          {f.text}
-        </span>
-      ));
-
-  const selCard = selHand != null && game.p && game.p.hand[selHand] ? byId[game.p.hand[selHand].cid] : null;
-  const hovCard = hovHand != null && game.p && game.p.hand[hovHand] ? byId[game.p.hand[hovHand].cid] : null;
-  const previewCard = hovCard || selCard;
-  const inspectM = !previewCard && inspect && game[inspect.side] ? game[inspect.side].board.find((m) => m.uid === inspect.uid) : null;
-  const spellTargeting = !!(selCard && selCard.sp && (selCard.sp.t === "any" || selCard.sp.t === "fm") && game.p && effCost(game, "p", selCard) <= game.p.mana);
-  const enemyTaunts = game.a ? game.a.board.filter((m) => m.taunt) : [];
-  const isT = (side, uid) => {
-    if (!myTurn) return false;
-    if (spellTargeting) {
-      if (selCard.sp.t === "any") return true;
-      return side === "p" && !!uid;
-    }
-    if (selAtk) {
-      if (side !== "a") return false;
-      if (enemyTaunts.length) return !!uid && !!game.a.board.find((m) => m.uid === uid && m.taunt);
-      return true;
-    }
-    return false;
-  };
-
-  const goldBtn = {
+  const goldBtn: CSSProperties = {
     padding: "10px 26px", borderRadius: 999, fontWeight: 800, fontSize: 15, cursor: "pointer",
     border: "2px solid #f0d98c", background: "linear-gradient(180deg,#ffe08a,#c79a2e)", color: "#4a3508",
     boxShadow: "0 0 14px rgba(255,215,0,.45)", fontFamily: "inherit",
   };
 
-  const outer = {
+  const outer: CSSProperties = {
     minHeight: "100vh", display: "flex", flexDirection: "column",
     background: "radial-gradient(ellipse at center,#36452c 0%,#222d18 60%,#141b0d 100%)",
     fontFamily: "Georgia,'Noto Serif SC','SimSun',serif", position: "relative", overflow: "hidden", userSelect: "none",
@@ -1184,10 +395,10 @@ export default function ArcaneThrone() {
 
   // ---------- 牌组构建 ----------
   if (game.phase === "deck") {
-    const counts = {};
+    const counts: Record<number, number> = {};
     deckSel.forEach((id) => (counts[id] = (counts[id] || 0) + 1));
     const full = deckSel.length >= 30;
-    const subBtn = { padding: "7px 14px", borderRadius: 999, fontWeight: 700, fontSize: 12, cursor: "pointer", border: "1px solid #8a6d3b", background: "rgba(0,0,0,.3)", color: "#cdbf9a", fontFamily: "inherit" };
+    const subBtn: CSSProperties = { padding: "7px 14px", borderRadius: 999, fontWeight: 700, fontSize: 12, cursor: "pointer", border: "1px solid #8a6d3b", background: "rgba(0,0,0,.3)", color: "#cdbf9a", fontFamily: "inherit" };
     return (
       <div style={{ ...outer, overflowY: "auto", padding: "16px 12px" }}>
         <style>{CSS}</style>
@@ -1250,6 +461,38 @@ export default function ArcaneThrone() {
       </div>
     );
   }
+
+  // ---------- 渲染辅助(此处起 game 已收窄为 GameState) ----------
+  const floats = (key: string) =>
+    (game.fx || [])
+      .filter((f) => f.key === key)
+      .map((f) => (
+        <span key={f.id} style={{ position: "absolute", left: "50%", top: -4, transform: "translateX(-50%)", color: f.color, fontWeight: 900, fontSize: 18, textShadow: "0 1px 3px #000", animation: "fUp 1s ease-out forwards", pointerEvents: "none", zIndex: 60, whiteSpace: "nowrap" }}>
+          {f.text}
+        </span>
+      ));
+
+  const selCard = selHand != null && game.p.hand[selHand] ? byId[game.p.hand[selHand].cid] : null;
+  const hovCard = hovHand != null && game.p.hand[hovHand] ? byId[game.p.hand[hovHand].cid] : null;
+  const previewCard = hovCard || selCard;
+  const inspectM = !previewCard && inspect ? game[inspect.side].board.find((m) => m.uid === inspect.uid) : null;
+  const selTargetKind = selCard ? spTarget(selCard.sp) : undefined;
+  const spellTargeting = !!(selCard && selTargetKind && effCost(game, "p", selCard) <= game.p.mana);
+  const enemyTaunts = game.a.board.filter((m) => m.taunt);
+  const isT = (side: Side, uid: number | null) => {
+    if (!myTurn) return false;
+    if (spellTargeting) {
+      if (selTargetKind === "any") return true;
+      return side === "p" && !!uid;
+    }
+    if (selAtk) {
+      if (side !== "a") return false;
+      if (enemyTaunts.length) return !!uid && !!game.a.board.find((m) => m.uid === uid && m.taunt);
+      return true;
+    }
+    return false;
+  };
+  const pending = game.pending;
 
   // ---------- 对战界面 ----------
   return (
@@ -1332,13 +575,13 @@ export default function ArcaneThrone() {
           <div style={{ color: "#ffd700", fontSize: 10, marginTop: 5, fontStyle: "italic" }}>
             {previewCard !== selCard
               ? "点击卡牌选中"
-              : previewCard.type === "m" || !(previewCard.sp.t === "any" || previewCard.sp.t === "fm")
+              : previewCard.type === "m" || !spTarget(previewCard.sp)
               ? "再次点击卡牌打出"
               : "点击目标施放"}
           </div>
         </div>
       )}
-      {inspectM && (
+      {inspectM && inspect && (
         <div style={{ position: "absolute", bottom: 138, left: "50%", transform: "translateX(-50%)", zIndex: 70, pointerEvents: "none", width: 156, borderRadius: 12, padding: "10px 8px", background: inspect.side === "p" ? "linear-gradient(170deg,#7a5c33,#3c2b12)" : "linear-gradient(170deg,#4a3354,#241a2c)", border: "2px solid " + (inspect.side === "p" ? "#c9a85a" : "#a06bc4"), boxShadow: "0 8px 24px rgba(0,0,0,.7)", textAlign: "center" }}>
           <div style={{ fontSize: 34 }}>{inspectM.emoji}</div>
           <div style={{ color: byId[inspectM.cid] && byId[inspectM.cid].rarity !== "c" ? RARITY[byId[inspectM.cid].rarity].color : "#ffe9b0", fontWeight: 800, fontSize: 14, textShadow: "0 1px 2px #000" }}>{inspectM.name}</div>
@@ -1407,28 +650,29 @@ export default function ArcaneThrone() {
       )}
 
       {/* 抉择弹窗 */}
-      {game.pending && (
+      {pending && (
         <div style={{ position: "absolute", inset: 0, background: "rgba(8,6,2,.78)", zIndex: 86, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, padding: 20 }}>
           <div style={{ fontSize: 19, fontWeight: 900, color: "#ffd700", textShadow: "0 0 14px rgba(255,200,0,.6)", letterSpacing: 2, textAlign: "center" }}>
-            {game.pending.k === "camp"
-              ? `🏕️ 星夜露宿 — 抉择(剩余 ${game.pending.remaining} 次)`
-              : game.pending.k === "bloomMode"
+            {pending.k === "camp"
+              ? `🏕️ 星夜露宿 — 抉择(剩余 ${pending.remaining} 次)`
+              : pending.k === "bloomMode"
               ? "🌺 夜影花蕾 — 抉择"
-              : game.pending.k === "choose"
-              ? `${game.pending.emoji} ${game.pending.name} — 抉择`
-              : game.pending.k === "moonPick"
+              : pending.k === "choose"
+              ? `${pending.emoji} ${pending.name} — 抉择`
+              : pending.k === "moonPick"
               ? "🌙 月光指引 — 发现一张牌,获得其复制"
-              : `🌺 夜影花蕾 — ${game.pending.mode === "m" ? "选择一个随从召唤" : "选择一个法术施放"}`}
+              : `🌺 夜影花蕾 — ${pending.mode === "m" ? "选择一个随从召唤" : "选择一个法术施放"}`}
           </div>
           <div style={{ display: "flex", gap: 14, flexWrap: "wrap", justifyContent: "center" }}>
-            {game.pending.k === "bloomMode" &&
+            {pending.k === "bloomMode" &&
               (() => {
                 const mOk = game.p.board.length < 6 && game.p.deck.some((cid) => byId[cid].type === "m");
                 const sOk = game.p.deck.some((cid) => byId[cid].type === "s");
-                return [
+                const modes: { id: BloomMode; ok: boolean; emoji: string; title: string; desc: string; off: string | false }[] = [
                   { id: "m", ok: mOk, emoji: "⚔️", title: "召唤随从", desc: "从牌库随机 3 张随从牌中选 1 张召唤", off: !mOk && (game.p.board.length >= 6 ? "随从区已满" : "牌库中没有随从牌") },
                   { id: "s", ok: sOk, emoji: "📜", title: "释放法术", desc: "从牌库随机 3 张法术牌中选 1 张施放", off: !sOk && "牌库中没有可施放的法术牌" },
-                ].map((o) => (
+                ];
+                return modes.map((o) => (
                   <div
                     key={o.id}
                     onClick={() => { if (o.ok) pickBloomMode(o.id); }}
@@ -1440,10 +684,10 @@ export default function ArcaneThrone() {
                   </div>
                 ));
               })()}
-            {(game.pending.k === "bloomPick" || game.pending.k === "moonPick") &&
-              game.pending.opts.map((cid, idx) => {
+            {(pending.k === "bloomPick" || pending.k === "moonPick") &&
+              pending.opts.map((cid, idx) => {
                 const c = byId[cid];
-                const pick = game.pending.k === "moonPick" ? pickMoon : pickBloomCard;
+                const pick = pending.k === "moonPick" ? pickMoon : pickBloomCard;
                 return (
                   <div
                     key={idx}
@@ -1460,8 +704,8 @@ export default function ArcaneThrone() {
                   </div>
                 );
               })}
-            {game.pending.k === "choose" &&
-              game.pending.opts.map((o, idx) => (
+            {pending.k === "choose" &&
+              pending.opts.map((o, idx) => (
                 <div
                   key={idx}
                   onClick={() => pickChoose(idx)}
@@ -1471,12 +715,14 @@ export default function ArcaneThrone() {
                   <div style={{ color: "#ffe9b0", fontWeight: 800, fontSize: 13, marginTop: 6, lineHeight: 1.5 }}>{o.label}</div>
                 </div>
               ))}
-            {game.pending.k === "camp" &&
-              [
-                { o: "mana", emoji: "💎", title: "回复法力", desc: "回复 3 个法力水晶" },
-                { o: "draw", emoji: "🃏", title: "抽牌", desc: "抽两张牌" },
-                { o: "armor", emoji: "🛡️", title: "护甲", desc: "获得 5 点护甲" },
-              ].map((x) => (
+            {pending.k === "camp" &&
+              (
+                [
+                  { o: "mana", emoji: "💎", title: "回复法力", desc: "回复 3 个法力水晶" },
+                  { o: "draw", emoji: "🃏", title: "抽牌", desc: "抽两张牌" },
+                  { o: "armor", emoji: "🛡️", title: "护甲", desc: "获得 5 点护甲" },
+                ] as { o: CampOpt; emoji: string; title: string; desc: string }[]
+              ).map((x) => (
                 <div
                   key={x.o}
                   onClick={() => pickCamp(x.o)}
@@ -1488,7 +734,7 @@ export default function ArcaneThrone() {
                 </div>
               ))}
           </div>
-          {game.pending.k === "choose" || game.pending.k === "bloomMode" ? (
+          {pending.k === "choose" || pending.k === "bloomMode" ? (
             <button onClick={cancelPending} style={{ padding: "8px 22px", borderRadius: 999, fontWeight: 700, fontSize: 13, cursor: "pointer", border: "1px solid #8a6d3b", background: "rgba(0,0,0,.45)", color: "#cdbf9a", fontFamily: "inherit" }}>
               ↩ 取消(不消耗费用)
             </button>
