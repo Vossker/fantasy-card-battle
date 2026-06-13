@@ -137,6 +137,7 @@ export interface GameState {
   turnNum: number;
   winner: Side | null;
   surrendered?: boolean;
+  rngState: number; // 可复现 PRNG 状态(mulberry32 的 uint32 种子);只存数字以保证 JSON 克隆安全
   fx: FloatFx[];
   logs: LogEntry[];
   lastLog: string;

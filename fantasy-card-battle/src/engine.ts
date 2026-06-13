@@ -12,6 +12,18 @@ let UID = 1, FXID = 1;
 export const clone = <T>(o: T): T => JSON.parse(JSON.stringify(o));
 export const other = (s: Side): Side => (s === "p" ? "a" : "p");
 
+// 可复现随机数:mulberry32 PRNG,状态即 st.rngState(单个 uint32)。
+// 引擎所有随机都走这里,初始化时注入种子即可复现整局(含 AI 回合);克隆安全因为只存数字。
+export function rand(st: GameState): number {
+  let a = (st.rngState + 0x6d2b79f5) | 0;
+  st.rngState = a;
+  let t = Math.imul(a ^ (a >>> 15), 1 | a);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+export const randInt = (st: GameState, n: number): number => Math.floor(rand(st) * n);
+export const randPick = <T>(st: GameState, arr: T[]): T => arr[randInt(st, arr.length)];
+
 export function fx(st: GameState, key: string, text: string, color: string) {
   st.fx.push({ id: FXID++, key, text, color, ts: Date.now() });
 }
@@ -96,7 +108,7 @@ function doBattlecry(st: GameState, side: Side, c: MinionCard) {
     const s = st[side];
     const pool = s.deck.filter((cid) => byId[cid].type === "m");
     if (!pool.length || s.board.length >= 6) return;
-    const mc = byId[pool[Math.floor(Math.random() * pool.length)]];
+    const mc = byId[randPick(st, pool)];
     s.board.push({
       uid: UID++, cid: mc.id, name: mc.name, emoji: mc.emoji,
       atk: 1, hp: 1, maxHp: 1,
@@ -131,7 +143,7 @@ export function gainMoonCopy(st: GameState, side: Side, cid: number) {
 }
 export function sampleDeckAny(st: GameState, side: Side): number[] {
   const cids = [...new Set(st[side].deck)];
-  shuffle(cids);
+  shuffle(cids, () => rand(st));
   return cids.slice(0, 3);
 }
 
@@ -148,7 +160,7 @@ export function sampleDeck(st: GameState, side: Side, type: "m" | "s"): number[]
     const c = byId[cid];
     if (c.type === type) idxs.push(i);
   });
-  shuffle(idxs);
+  shuffle(idxs, () => rand(st));
   return idxs.slice(0, 3).map((i) => st[side].deck[i]);
 }
 // 注意:名字有误导,它不从牌库移除,只是按 cid 把随从放上场(需要移除时调用方自己 removeFromDeck)
@@ -175,80 +187,187 @@ function dmgExtras(st: GameState, side: Side, sp: { draw?: number; armor?: numbe
     log(st, `${side === "p" ? "你" : "对手"}召唤了一个 ${t.atk}/${t.hp} 的「${t.name}」`);
   }
 }
-// 从牌库直接施放的法术自动选择目标;抉择类法术由系统随机选择选项
+// ================= 效果注册表(替代 sp.k 的多处 switch 分发) =================
+// 每种法术效果集中定义三件事:
+//   summary  — 卡面角标简述(显示层);
+//   cast     — 从手牌打出(有明确目标,玩家与 AI 共用);交互类法术(choose/camp/bloom/moonlight)
+//              省略此项,从手牌打出时由 UI 的 pending 流程接管;
+//   autoCast — 从牌库自动施放(夜影花蕾翻出时),目标自动选择、抉择随机结算。
+// EffectRegistry 是受 mapped type 约束的完整映射:给 SpellDef 新增一个 k 却忘了在此登记,直接编译报错。
+type EffectHandler<S extends SpellDef> = {
+  summary: (sp: S, bonus: number) => string;
+  cast?: (st: GameState, side: Side, sp: S, tgt: SpellTarget | null, bonus: number) => void;
+  autoCast: (st: GameState, side: Side, sp: S, bonus: number, name: string) => void;
+};
+type EffectRegistry = { [K in SpellDef["k"]]: EffectHandler<Extract<SpellDef, { k: K }>> };
+
+const EFFECTS: EffectRegistry = {
+  dmg: {
+    summary: (sp, bonus) => (bonus > 0 ? `伤害* ${sp.n + bonus} *` : `伤害 ${sp.n}`),
+    cast: (st, side, sp, tgt, bonus) => {
+      const t = tgt!; // isValidSpellTarget 已保证非空
+      const n = sp.n + bonus;
+      if (t.hero) dmgHero(st, t.side, n);
+      else dmgMinion(st, t.side, t.uid!, n);
+      dmgExtras(st, side, sp);
+    },
+    autoCast: (st, side, sp, bonus) => {
+      const e = other(side);
+      const n = sp.n + bonus;
+      const tgts: AttackTarget[] = st[e].board.map((m) => ({ uid: m.uid }));
+      tgts.push({ hero: true });
+      const t = randPick(st, tgts);
+      if (t.hero) dmgHero(st, e, n);
+      else dmgMinion(st, e, t.uid!, n);
+      dmgExtras(st, side, sp);
+    },
+  },
+  aoe: {
+    summary: (sp, bonus) => (bonus > 0 ? `全体* ${sp.n + bonus} *` : `全体 ${sp.n}`),
+    cast: (st, side, sp, _tgt, bonus) => {
+      const e = other(side);
+      st[e].board.map((m) => m.uid).forEach((u) => dmgMinion(st, e, u, sp.n + bonus));
+    },
+    autoCast: (st, side, sp, bonus) => {
+      const e = other(side);
+      st[e].board.map((m) => m.uid).forEach((u) => dmgMinion(st, e, u, sp.n + bonus));
+    },
+  },
+  heal: {
+    summary: (sp) => `治疗 ${sp.n}`,
+    cast: (st, _side, sp, tgt) => {
+      const t = tgt!;
+      if (t.hero) {
+        const h = st[t.side];
+        h.hp = Math.min(30, h.hp + sp.n);
+        fx(st, t.side + "-hero", "+" + sp.n, "#5ef08a");
+      } else {
+        const m = st[t.side].board.find((x) => x.uid === t.uid);
+        if (m) { m.hp = Math.min(m.maxHp, m.hp + sp.n); fx(st, "m" + m.uid, "+" + sp.n, "#5ef08a"); }
+      }
+    },
+    autoCast: (st, side, sp) => {
+      const h = st[side];
+      h.hp = Math.min(30, h.hp + sp.n);
+      fx(st, side + "-hero", "+" + sp.n, "#5ef08a");
+    },
+  },
+  buff: {
+    summary: (sp) => `+${sp.a}/+${sp.h}`,
+    cast: (st, _side, sp, tgt) => {
+      const t = tgt!;
+      const m = st[t.side].board.find((x) => x.uid === t.uid);
+      if (m) { m.atk += sp.a; m.hp += sp.h; m.maxHp += sp.h; fx(st, "m" + m.uid, `+${sp.a}/+${sp.h}`, "#ffd700"); }
+    },
+    autoCast: (st, side, sp) => {
+      const board = st[side].board;
+      if (board.length) {
+        const m = [...board].sort((a, b) => b.atk + b.hp - (a.atk + a.hp))[0];
+        m.atk += sp.a; m.hp += sp.h; m.maxHp += sp.h;
+        fx(st, "m" + m.uid, `+${sp.a}/+${sp.h}`, "#ffd700");
+      }
+    },
+  },
+  draw: {
+    summary: (sp) => `抽 ${sp.n} 张`,
+    cast: (st, side, sp) => draw(st, side, sp.n),
+    autoCast: (st, side, sp) => draw(st, side, sp.n),
+  },
+  coin: {
+    summary: () => "+1 法力",
+    cast: (st, side) => {
+      const s = st[side];
+      s.mana = Math.min(10, s.mana + 1);
+      fx(st, side + "-hero", "+1💎", "#7cc4ff");
+    },
+    autoCast: (st, side) => {
+      const s = st[side];
+      s.mana = Math.min(10, s.mana + 1);
+      fx(st, side + "-hero", "+1💎", "#7cc4ff");
+    },
+  },
+  bio: {
+    summary: () => "双方+2水晶",
+    cast: (st, side) => { gainMana(st, side, 2); gainMana(st, other(side), 2); },
+    autoCast: (st, side) => { gainMana(st, side, 2); gainMana(st, other(side), 2); },
+  },
+  obelisk: {
+    summary: () => "法伤+1",
+    cast: (st, side, _sp, _tgt, bonus) => { st[side].spellDmg = bonus + 1; fx(st, side + "-hero", "法伤+1", "#c478f0"); },
+    autoCast: (st, side, _sp, bonus) => { st[side].spellDmg = bonus + 1; fx(st, side + "-hero", "法伤+1", "#c478f0"); },
+  },
+  // 以下为交互类:从手牌打出时由 UI pending 接管,故无 cast;仅在被夜影花蕾从牌库翻出时随机结算(autoCast)。
+  choose: {
+    summary: () => "抉择",
+    autoCast: (st, side, sp, _bonus, name) => {
+      const o = randPick(st, sp.opts);
+      applyOpt(st, side, o);
+      log(st, `「${name}」(随机)抉择了${o.label}`);
+    },
+  },
+  camp: {
+    summary: () => "抉择×3",
+    autoCast: (st, side, _sp, _bonus, name) => {
+      const picked: string[] = [];
+      for (let k = 0; k < 3; k++) {
+        const o = randPick(st, ["mana", "draw", "armor"] as const);
+        campEffect(st, side, o);
+        picked.push(campLabel(o));
+      }
+      log(st, `「${name}」(随机)抉择了:${picked.join("、")}`);
+    },
+  },
+  bloom: {
+    summary: () => "抉择",
+    autoCast: (st, side, _sp, _bonus, name) => {
+      const mOk = st[side].board.length < 6 && st[side].deck.some((x) => byId[x].type === "m");
+      const sOk = st[side].deck.some((x) => byId[x].type === "s");
+      const modes: BloomMode[] = [];
+      if (mOk) modes.push("m");
+      if (sOk) modes.push("s");
+      if (!modes.length) return;
+      const mode = randPick(st, modes);
+      const picks = sampleDeck(st, side, mode);
+      const pick = randPick(st, picks);
+      removeFromDeck(st, side, pick);
+      if (mode === "m") {
+        log(st, `「${name}」(随机)从牌库召唤了「${byId[pick].name}」`);
+        summonFromDeck(st, side, pick);
+      } else {
+        log(st, `「${name}」(随机)从牌库施放了「${byId[pick].name}」`);
+        castDeckSpell(st, side, pick);
+      }
+    },
+  },
+  moonlight: {
+    summary: () => "发现",
+    autoCast: (st, side, _sp, _bonus, name) => {
+      const opts = sampleDeckAny(st, side);
+      if (opts.length) {
+        const pick = randPick(st, opts);
+        gainMoonCopy(st, side, pick);
+        log(st, `「${name}」(随机)发现了「${byId[pick].name}」的复制`);
+      }
+    },
+  },
+};
+
+// 按 k 动态取处理器:TS 无法表达"索引出的 handler 与传入的 sp 同 k",在此做一次本地断言收口。
+type AnyEffect = {
+  summary: (sp: SpellDef, bonus: number) => string;
+  cast?: (st: GameState, side: Side, sp: SpellDef, tgt: SpellTarget | null, bonus: number) => void;
+  autoCast: (st: GameState, side: Side, sp: SpellDef, bonus: number, name: string) => void;
+};
+const effectFor = (k: SpellDef["k"]): AnyEffect => EFFECTS[k] as unknown as AnyEffect;
+
+// 卡面法术简述(显示层单一来源)。法伤加成生效时由各效果的 summary 自行渲染为 * n * 形式。
+export const spSummary = (sp?: SpellDef, bonus = 0): string => (sp ? effectFor(sp.k).summary(sp, bonus) : "法术");
+
+// 从牌库直接施放:目标自动选择,抉择类随机结算(委派注册表的 autoCast)
 export function castDeckSpell(st: GameState, side: Side, cid: number) {
   const c = byId[cid];
   if (!c || !c.sp) return;
-  const sp = c.sp;
-  const e = other(side);
-  const bonus = st[side].spellDmg || 0;
-  if (sp.k === "dmg") {
-    const n = sp.n + bonus;
-    const tgts: AttackTarget[] = st[e].board.map((m) => ({ uid: m.uid }));
-    tgts.push({ hero: true });
-    const t = tgts[Math.floor(Math.random() * tgts.length)];
-    if (t.hero) dmgHero(st, e, n);
-    else dmgMinion(st, e, t.uid!, n);
-    dmgExtras(st, side, sp);
-  } else if (sp.k === "heal") {
-    const h = st[side];
-    h.hp = Math.min(30, h.hp + sp.n);
-    fx(st, side + "-hero", "+" + sp.n, "#5ef08a");
-  } else if (sp.k === "buff") {
-    const board = st[side].board;
-    if (board.length) {
-      const m = [...board].sort((a, b) => b.atk + b.hp - (a.atk + a.hp))[0];
-      m.atk += sp.a; m.hp += sp.h; m.maxHp += sp.h;
-      fx(st, "m" + m.uid, `+${sp.a}/+${sp.h}`, "#ffd700");
-    }
-  } else if (sp.k === "draw") {
-    draw(st, side, sp.n);
-  } else if (sp.k === "aoe") {
-    st[e].board.map((m) => m.uid).forEach((u) => dmgMinion(st, e, u, sp.n + bonus));
-  } else if (sp.k === "bio") {
-    gainMana(st, side, 2);
-    gainMana(st, e, 2);
-  } else if (sp.k === "obelisk") {
-    st[side].spellDmg = bonus + 1;
-    fx(st, side + "-hero", "法伤+1", "#c478f0");
-  } else if (sp.k === "moonlight") {
-    const opts = sampleDeckAny(st, side);
-    if (opts.length) {
-      const pick = opts[Math.floor(Math.random() * opts.length)];
-      gainMoonCopy(st, side, pick);
-      log(st, `「${c.name}」(随机)发现了「${byId[pick].name}」的复制`);
-    }
-  } else if (sp.k === "choose") {
-    const o = sp.opts[Math.floor(Math.random() * sp.opts.length)];
-    applyOpt(st, side, o);
-    log(st, `「${c.name}」(随机)抉择了${o.label}`);
-  } else if (sp.k === "camp") {
-    const picked: string[] = [];
-    for (let k = 0; k < 3; k++) {
-      const o = (["mana", "draw", "armor"] as const)[Math.floor(Math.random() * 3)];
-      campEffect(st, side, o);
-      picked.push(campLabel(o));
-    }
-    log(st, `「${c.name}」(随机)抉择了:${picked.join("、")}`);
-  } else if (sp.k === "bloom") {
-    const mOk = st[side].board.length < 6 && st[side].deck.some((x) => byId[x].type === "m");
-    const sOk = st[side].deck.some((x) => byId[x].type === "s");
-    const modes: BloomMode[] = [];
-    if (mOk) modes.push("m");
-    if (sOk) modes.push("s");
-    if (!modes.length) return;
-    const mode = modes[Math.floor(Math.random() * modes.length)];
-    const picks = sampleDeck(st, side, mode);
-    const pick = picks[Math.floor(Math.random() * picks.length)];
-    removeFromDeck(st, side, pick);
-    if (mode === "m") {
-      log(st, `「${c.name}」(随机)从牌库召唤了「${byId[pick].name}」`);
-      summonFromDeck(st, side, pick);
-    } else {
-      log(st, `「${c.name}」(随机)从牌库施放了「${byId[pick].name}」`);
-      castDeckSpell(st, side, pick);
-    }
-  }
+  effectFor(c.sp.k).autoCast(st, side, c.sp, st[side].spellDmg || 0, c.name);
 }
 export function gainMana(st: GameState, side: Side, n: number, empty = false) {
   const s = st[side];
@@ -273,11 +392,13 @@ export function isValidSpellTarget(st: GameState, side: Side, sp: SpellDef | und
   if (!sp) return false;
   const caster = st[side];
   if (!caster) return false;
-  if (sp.k === "draw" || sp.k === "aoe" || sp.k === "coin" || sp.k === "bio" || sp.k === "obelisk") return !tgt;
-  if (!tgt) return false;
+  // 数据驱动:目标类型直接读卡面 sp.t。无目标法术(无 t 字段)统一走 !tgt,
+  // 新增无目标法术不再需要修改本函数(此前要往硬编码白名单里加一行)。
   const t = spTarget(sp);
+  if (!t) return !tgt;
+  if (!tgt) return false;
   if (t === "fm") return tgt.side === side && !!tgt.uid && !!caster.board.find((m) => m.uid === tgt.uid);
-  if (t !== "any") return false;
+  // t === "any":任意角色
   const targetSide = st[tgt.side];
   if (!targetSide) return false;
   if (tgt.hero) return true;
@@ -290,49 +411,15 @@ export function castSpell(st: GameState, side: Side, i: number, tgt: SpellTarget
   const en = s.hand[i];
   if (!en) return false;
   const c = byId[en.cid];
-  if (!c) return false;
-  const sp = c.sp;
+  if (!c || c.type !== "s") return false;
+  const sp = c.sp; // c 已收窄为 SpellCard,sp 为 SpellDef(非 undefined)
+  const handler = effectFor(sp.k);
+  if (!handler.cast) return false; // 交互类法术(choose/camp/bloom/moonlight)不从此路径打出,由 UI 的 pending 接管
   const cost = effCost(st, side, c);
-  if (!c || c.type !== "s" || cost > s.mana || !isValidSpellTarget(st, side, sp, tgt)) return false;
+  if (cost > s.mana || !isValidSpellTarget(st, side, sp, tgt)) return false;
   s.mana -= cost;
   s.hand.splice(i, 1);
-  const bonus = s.spellDmg || 0;
-  if (sp.k === "dmg") {
-    // 有目标的分支:isValidSpellTarget 已保证 tgt 非空
-    const t = tgt!;
-    const n = sp.n + bonus;
-    if (t.hero) dmgHero(st, t.side, n);
-    else dmgMinion(st, t.side, t.uid!, n);
-    dmgExtras(st, side, sp);
-  } else if (sp.k === "heal") {
-    const t = tgt!;
-    if (t.hero) {
-      const h = st[t.side];
-      h.hp = Math.min(30, h.hp + sp.n);
-      fx(st, t.side + "-hero", "+" + sp.n, "#5ef08a");
-    } else {
-      const m = st[t.side].board.find((x) => x.uid === t.uid);
-      if (m) { m.hp = Math.min(m.maxHp, m.hp + sp.n); fx(st, "m" + m.uid, "+" + sp.n, "#5ef08a"); }
-    }
-  } else if (sp.k === "buff") {
-    const t = tgt!;
-    const m = st[t.side].board.find((x) => x.uid === t.uid);
-    if (m) { m.atk += sp.a; m.hp += sp.h; m.maxHp += sp.h; fx(st, "m" + m.uid, `+${sp.a}/+${sp.h}`, "#ffd700"); }
-  } else if (sp.k === "draw") {
-    draw(st, side, sp.n);
-  } else if (sp.k === "coin") {
-    s.mana = Math.min(10, s.mana + 1);
-    fx(st, side + "-hero", "+1💎", "#7cc4ff");
-  } else if (sp.k === "bio") {
-    gainMana(st, side, 2);
-    gainMana(st, other(side), 2);
-  } else if (sp.k === "obelisk") {
-    s.spellDmg = bonus + 1;
-    fx(st, side + "-hero", "法伤+1", "#c478f0");
-  } else if (sp.k === "aoe") {
-    const e = other(side);
-    st[e].board.map((m) => m.uid).forEach((u) => dmgMinion(st, e, u, sp.n + bonus));
-  }
+  handler.cast(st, side, sp, tgt, s.spellDmg || 0);
   moonTutor(st, side, en);
   return true;
 }
@@ -360,16 +447,23 @@ export function resolveAttack(st: GameState, side: Side, auid: number, tgt: Atta
   return true;
 }
 
-export function initGame(playerDeck: number[] | null = null): GameState {
-  const first: Side = Math.random() < 0.5 ? "p" : "a";
-  const second = other(first);
+// seed 缺省取系统熵;测试传入固定 seed 即可复现整局。
+export function initGame(playerDeck: number[] | null = null, seed: number = (Date.now() ^ (Math.random() * 0x100000000)) | 0): GameState {
   const st: GameState = {
-    phase: "play", turn: first, first, turnNum: first === "p" ? 1 : 0, winner: null, fx: [], logs: [], notice: null, pending: null,
-    lastLog: "",
-    banner: { text: first === "p" ? "你是先手!" : "对手先手", id: Date.now() },
-    p: { hp: 30, armor: 0, mana: 0, maxMana: 0, fatigue: 0, spellDmg: 0, deck: playerDeck ? shuffle([...playerDeck]) : buildDeck(), hand: [], board: [] },
-    a: { hp: 30, armor: 0, mana: 0, maxMana: 0, fatigue: 0, spellDmg: 0, deck: buildDeck(), hand: [], board: [] },
+    phase: "play", turn: "p", first: "p", turnNum: 0, winner: null, rngState: seed | 0, fx: [], logs: [], notice: null, pending: null,
+    lastLog: "", banner: null,
+    p: { hp: 30, armor: 0, mana: 0, maxMana: 0, fatigue: 0, spellDmg: 0, deck: [], hand: [], board: [] },
+    a: { hp: 30, armor: 0, mana: 0, maxMana: 0, fatigue: 0, spellDmg: 0, deck: [], hand: [], board: [] },
   };
+  const rng = () => rand(st);
+  const first: Side = rand(st) < 0.5 ? "p" : "a";
+  const second = other(first);
+  st.turn = first;
+  st.first = first;
+  st.turnNum = first === "p" ? 1 : 0;
+  st.banner = { text: first === "p" ? "你是先手!" : "对手先手", id: Date.now() };
+  st.p.deck = playerDeck ? shuffle([...playerDeck], rng) : buildDeck(rng);
+  st.a.deck = buildDeck(rng);
   log(st, first === "p"
     ? "你获得先手!点击手牌查看,再次点击打出。"
     : "对手获得先手,你作为后手多抽一张牌并获得「幸运币」。");

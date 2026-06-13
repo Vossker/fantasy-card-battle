@@ -1,10 +1,10 @@
 // ================= 主组件:菜单 / 牌组构建 / 对战 UI =================
 import { useState, useRef, useEffect, type CSSProperties } from "react";
-import { POOL, RARITY, byId, maxCopies, HAND_LIMIT, kw, spSummary, cardDesc, spTarget, loadPlayerDeck } from "./cards";
+import { POOL, RARITY, byId, maxCopies, HAND_LIMIT, kw, cardDesc, spTarget, loadPlayerDeck } from "./cards";
 import {
   clone, log, effCost, initGame, startTurn, playMinion, castSpell, castDeckSpell,
   resolveAttack, removeFromDeck, summonFromDeck, sampleDeck, sampleDeckAny,
-  campEffect, campLabel, applyOpt, moonTutor, gainMoonCopy,
+  campEffect, campLabel, applyOpt, moonTutor, gainMoonCopy, spSummary,
 } from "./engine";
 import { computeAiTurn } from "./ai";
 import { CSS, MinionEl, HeroEl, HandCard } from "./ui/components";
@@ -57,7 +57,7 @@ export default function ArcaneThrone() {
   // 状态更新统一走 mutate:深拷贝当前 state → fn 内用引擎函数修改 → setGame
   const mutate = (fn: (st: GameState) => void) =>
     setGame((g) => {
-      if (g.phase === "menu" || g.phase === "deck") return g;
+      if (g.phase !== "play" && g.phase !== "over") return g;
       const st = clone(g);
       fn(st);
       return st;
@@ -463,6 +463,8 @@ export default function ArcaneThrone() {
   }
 
   // ---------- 渲染辅助(此处起 game 已收窄为 GameState) ----------
+  // menu / deck 两个 phase 已在上方提前 return,这里显式收窄让 TS 消除 LobbyState 分支
+  if (game.phase !== "play" && game.phase !== "over") return null;
   const floats = (key: string) =>
     (game.fx || [])
       .filter((f) => f.key === key)

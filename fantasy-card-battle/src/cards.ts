@@ -5,8 +5,8 @@ export const POOL: Card[] = [
   { id: 1, name: "农夫民兵", emoji: "👨‍🌾", cost: 1, type: "m", rarity: "c", atk: 2, hp: 1, desc: "拿起草叉保卫家园。" },
   { id: 2, name: "新兵盾卫", emoji: "🛡️", cost: 1, type: "m", rarity: "c", atk: 1, hp: 2, taunt: 1, desc: "我来挡!" },
   { id: 3, name: "灵猫", emoji: "🐈", cost: 1, type: "m", rarity: "c", atk: 1, hp: 1, charge: 1, desc: "敏捷如风。" },
-  { id: 4, name: "见习法师", emoji: "🧙", cost: 2, type: "m", rarity: "c", atk: 2, hp: 2, desc: "刚学会第一个法术。" },
-  { id: 5, name: "矮人战士", emoji: "🪓", cost: 2, type: "m", rarity: "c", atk: 3, hp: 2, desc: "山岭之子。" },
+  { id: 4, name: "见习法师", emoji: "🧙", cost: 2, type: "m", rarity: "c", atk: 3, hp: 2, desc: "刚学会第一个法术。" },
+  { id: 5, name: "矮人战士", emoji: "🪓", cost: 2, type: "m", rarity: "c", atk: 2, hp: 3, desc: "山岭之子。" },
   { id: 6, name: "石墙守护者", emoji: "🗿", cost: 2, type: "m", rarity: "c", atk: 1, hp: 4, taunt: 1, desc: "坚如磐石。" },
   { id: 7, name: "游侠射手", emoji: "🏹", cost: 3, type: "m", rarity: "c", atk: 3, hp: 3, desc: "百步穿杨。" },
   { id: 8, name: "狮鹫骑士", emoji: "🦅", cost: 3, type: "m", rarity: "r", atk: 2, hp: 3, charge: 1, desc: "自天空俯冲!" },
@@ -62,45 +62,31 @@ export const kw = (c: { taunt?: boolean | 1; charge?: boolean | 1 }) =>
 // 法术的目标类型:"any" 任意角色 / "fm" 友方随从 / undefined 无目标
 export const spTarget = (sp?: SpellDef): SpellTargetKind | undefined => (sp && "t" in sp ? sp.t : undefined);
 
-export const spSummary = (sp?: SpellDef, bonus = 0): string => {
-  if (!sp) return "法术";
-  if (sp.k === "dmg") return bonus > 0 ? `伤害* ${sp.n + bonus} *` : `伤害 ${sp.n}`;
-  if (sp.k === "heal") return `治疗 ${sp.n}`;
-  if (sp.k === "buff") return `+${sp.a}/+${sp.h}`;
-  if (sp.k === "draw") return `抽 ${sp.n} 张`;
-  if (sp.k === "aoe") return bonus > 0 ? `全体* ${sp.n + bonus} *` : `全体 ${sp.n}`;
-  if (sp.k === "coin") return "+1 法力";
-  if (sp.k === "bloom") return "抉择";
-  if (sp.k === "camp") return "抉择×3";
-  if (sp.k === "choose") return "抉择";
-  if (sp.k === "bio") return "双方+2水晶";
-  if (sp.k === "moonlight") return "发现";
-  if (sp.k === "obelisk") return "法伤+1";
-  return "法术";
-};
+// spSummary 已迁至 engine.ts,与效果注册表(EFFECTS)共用同一处定义,避免"加一张卡两处改"。
 // 法伤加成生效时,牌面描述中的伤害数字改为 * n * 形式(如 +1 法伤的闪电箭显示"造成* 3 *点伤害")
 export const cardDesc = (c: Card, bonus = 0) =>
   c.sp && bonus > 0 && (c.sp.k === "dmg" || c.sp.k === "aoe")
     ? c.desc.replace(` ${c.sp.n} 点伤害`, `* ${c.sp.n + bonus} *点伤害`)
     : c.desc;
 
-export function shuffle<T>(deck: T[]): T[] {
+// rng 默认 Math.random;引擎调用时注入基于 st.rngState 的可复现 PRNG(见 engine.rand)
+export function shuffle<T>(deck: T[], rng: () => number = Math.random): T[] {
   for (let i = deck.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(rng() * (i + 1));
     [deck[i], deck[j]] = [deck[j], deck[i]];
   }
   return deck;
 }
-export function buildDeck(): number[] {
+export function buildDeck(rng: () => number = Math.random): number[] {
   const counts: Record<number, number> = {};
   const deck: number[] = [];
   while (deck.length < 30) {
-    const c = POOL[Math.floor(Math.random() * POOL.length)];
+    const c = POOL[Math.floor(rng() * POOL.length)];
     if ((counts[c.id] || 0) >= maxCopies(c)) continue;
     counts[c.id] = (counts[c.id] || 0) + 1;
     deck.push(c.id);
   }
-  return shuffle(deck);
+  return shuffle(deck, rng);
 }
 export function loadPlayerDeck(): number[] | null {
   try {

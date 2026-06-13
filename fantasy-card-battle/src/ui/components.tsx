@@ -1,7 +1,8 @@
 // ================= 展示组件(模块顶层,避免每次渲染重挂载导致 transition 失效) =================
 // 新增展示组件请保持定义在模块顶层的写法,不要移回主组件内部
 import type { ReactNode } from "react";
-import { byId, RARITY, spSummary } from "../cards";
+import { byId, RARITY } from "../cards";
+import { spSummary } from "../engine";
 import type { HandEntry, Minion, Side, SideState } from "../types";
 
 export const CSS = `
