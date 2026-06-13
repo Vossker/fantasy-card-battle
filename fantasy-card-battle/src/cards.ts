@@ -104,3 +104,65 @@ export function loadPlayerDeck(): number[] | null {
     return null;
   }
 }
+
+// ================= 多牌组管理(我的牌组,上限 9) =================
+export interface SavedDeck {
+  id: string;
+  name: string;
+  cards: number[]; // 可不足 30 张(预览中移除卡牌后即为未完成),仅 30 张时可用于对战
+}
+export const MAX_DECKS = 9;
+const DECKS_KEY = "arcane-decks";
+const ACTIVE_KEY = "arcane-active-deck";
+
+export const genDeckId = (): string => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+// 校验一副牌组的卡牌组成:不含 token、每种不超出上限、总数 ≤ 30。合法返回净化后的数组,否则 null
+function validDeckCards(d: unknown): number[] | null {
+  if (!Array.isArray(d) || d.length > 30) return null;
+  const counts: Record<number, number> = {};
+  for (const id of d) {
+    const c = byId[id];
+    if (!c || c.token) return null;
+    counts[id] = (counts[id] || 0) + 1;
+    if (counts[id] > maxCopies(c)) return null;
+  }
+  return d as number[];
+}
+
+export function saveDecks(decks: SavedDeck[]): void {
+  try { localStorage.setItem(DECKS_KEY, JSON.stringify(decks)); } catch {}
+}
+
+export function loadDecks(): SavedDeck[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DECKS_KEY) || "null");
+    if (Array.isArray(raw)) {
+      const decks: SavedDeck[] = [];
+      for (const x of raw) {
+        if (!x || typeof x.id !== "string" || typeof x.name !== "string") continue;
+        const cards = validDeckCards(x.cards);
+        if (!cards) continue;
+        decks.push({ id: x.id, name: x.name, cards });
+        if (decks.length >= MAX_DECKS) break;
+      }
+      return decks;
+    }
+    // 旧版只存一副牌组(arcane-deck),迁移为列表中的第一副并设为激活
+    const old = loadPlayerDeck();
+    if (old) {
+      const d: SavedDeck = { id: genDeckId(), name: "我的牌组", cards: old };
+      saveDecks([d]);
+      try { localStorage.setItem(ACTIVE_KEY, d.id); } catch {}
+      return [d];
+    }
+  } catch {}
+  return [];
+}
+
+export function loadActiveDeckId(): string | null {
+  try { return localStorage.getItem(ACTIVE_KEY); } catch { return null; }
+}
+export function saveActiveDeckId(id: string | null): void {
+  try { id ? localStorage.setItem(ACTIVE_KEY, id) : localStorage.removeItem(ACTIVE_KEY); } catch {}
+}

@@ -1,13 +1,16 @@
 // ================= 主组件:菜单 / 牌组构建 / 对战 UI =================
 import { useState, useRef, useEffect, type CSSProperties } from "react";
-import { POOL, RARITY, byId, maxCopies, HAND_LIMIT, kw, cardDesc, spTarget, loadPlayerDeck } from "./cards";
+import {
+  POOL, RARITY, byId, maxCopies, HAND_LIMIT, kw, cardDesc, spTarget,
+  MAX_DECKS, loadDecks, saveDecks, loadActiveDeckId, saveActiveDeckId, genDeckId, type SavedDeck,
+} from "./cards";
 import {
   clone, log, effCost, initGame, startTurn, playMinion, castSpell, castDeckSpell,
   resolveAttack, removeFromDeck, summonFromDeck, sampleDeck, sampleDeckAny,
   campEffect, campLabel, applyOpt, moonTutor, gainMoonCopy, spSummary,
 } from "./engine";
 import { computeAiTurn } from "./ai";
-import { CSS, MinionEl, HeroEl, HandCard } from "./ui/components";
+import { CSS, MinionEl, HeroEl, HandCard, Badge } from "./ui/components";
 import type { BloomMode, CampOpt, GameState, Side } from "./types";
 
 // 主菜单 / 牌组构建阶段没有对局数据;进入 play/over 后是完整 GameState
@@ -25,8 +28,21 @@ export default function ArcaneThrone() {
   const [inspect, setInspect] = useState<{ side: Side; uid: number } | null>(null);
   const [showLog, setShowLog] = useState(false);
   const [confirmSurrender, setConfirmSurrender] = useState(false);
-  const [playerDeck, setPlayerDeck] = useState<number[] | null>(loadPlayerDeck);
+  const [decks, setDecks] = useState<SavedDeck[]>(loadDecks);
+  const [activeId, setActiveId] = useState<string | null>(loadActiveDeckId);
   const [deckSel, setDeckSel] = useState<number[]>([]);
+  const [poolPage, setPoolPage] = useState(0); // 卡池分页(每页 20 张)
+  const [editingId, setEditingId] = useState<string | null>(null); // 当前编辑的牌组(null = 新建)
+  const [deckName, setDeckName] = useState("");
+  const [deckMsg, setDeckMsg] = useState("");
+  const [rightMode, setRightMode] = useState<"list" | "preview">("list"); // 右侧面板:牌组列表 / 当前牌组实时预览
+  const [hovPrevCid, setHovPrevCid] = useState<number | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameText, setRenameText] = useState("");
+  const [confirmDel, setConfirmDel] = useState<string | null>(null);
+  // 激活牌组;仅当满 30 张时用于对战,否则对战使用随机牌组
+  const activeDeck = decks.find((d) => d.id === activeId) || null;
+  const playerDeck = activeDeck && activeDeck.cards.length === 30 ? activeDeck.cards : null;
   const gameRef = useRef(game);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
@@ -45,6 +61,11 @@ export default function ArcaneThrone() {
     const t = setTimeout(() => setHint(null), 1800);
     return () => clearTimeout(t);
   }, [hint]);
+  useEffect(() => {
+    if (!deckMsg) return;
+    const t = setTimeout(() => setDeckMsg(""), 1800);
+    return () => clearTimeout(t);
+  }, [deckMsg]);
   useEffect(() => {
     if (game.phase === "play" && game.winner) {
       const t = setTimeout(() => setGame((g) => (g.phase === "play" ? { ...g, phase: "over" as const } : g)), 900);
@@ -93,10 +114,29 @@ export default function ArcaneThrone() {
     }, 750 * (snaps.length + 1));
   }
 
+  // 取一个未使用的默认牌组名(牌组 1、牌组 2……)
+  const defaultDeckName = () => {
+    for (let i = 1; ; i++) {
+      const n = `牌组 ${i}`;
+      if (!decks.some((d) => d.name === n)) return n;
+    }
+  };
+  // 进入构建区:从一副空白新牌组开始(右侧仍可选择编辑已有牌组)
+  const startNewDeck = () => {
+    setEditingId(null);
+    setDeckSel([]);
+    setDeckName(defaultDeckName());
+    setRightMode("preview");
+  };
   const openDeckBuilder = () => {
-    setDeckSel(playerDeck ? [...playerDeck] : []);
+    startNewDeck();
+    setRightMode(decks.length === 0 ? "preview" : "list");
+    setRenamingId(null); setConfirmDel(null); setDeckMsg("");
     setGame({ phase: "deck" });
   };
+  const persistDecks = (next: SavedDeck[]) => { setDecks(next); saveDecks(next); };
+  const setActive = (id: string) => { setActiveId(id); saveActiveDeckId(id); };
+
   const addCard = (id: number) => setDeckSel((d) => (d.length >= 30 || d.filter((x) => x === id).length >= maxCopies(byId[id]) ? d : [...d, id]));
   const removeCard = (id: number) =>
     setDeckSel((d) => {
@@ -117,14 +157,45 @@ export default function ArcaneThrone() {
       }
       return nd;
     });
+  // 保存当前构建区:编辑则更新原牌组,新建则追加(受 9 副上限约束);保存后停留在编辑态
   const saveDeck = () => {
     if (deckSel.length !== 30) return;
-    const d = [...deckSel];
-    setPlayerDeck(d);
-    try { localStorage.setItem("arcane-deck", JSON.stringify(d)); } catch {}
-    setGame({ phase: "menu" });
+    const cards = [...deckSel];
+    const name = deckName.trim() || defaultDeckName();
+    if (editingId) {
+      persistDecks(decks.map((d) => (d.id === editingId ? { ...d, name, cards } : d)));
+      setDeckMsg("已更新牌组 ✓");
+    } else {
+      if (decks.length >= MAX_DECKS) { setDeckMsg(`最多只能保存 ${MAX_DECKS} 个牌组`); return; }
+      const id = genDeckId();
+      persistDecks([...decks, { id, name, cards }]);
+      setEditingId(id);
+      if (!activeId) setActive(id); // 第一副牌组自动设为对战牌组
+      setDeckMsg("已保存牌组 ✓");
+    }
   };
-
+  // 载入已有牌组到构建区
+  const editDeck = (d: SavedDeck) => {
+    setEditingId(d.id); setDeckSel([...d.cards]); setDeckName(d.name);
+    setRightMode("preview"); setRenamingId(null);
+    setDeckMsg("");
+  };
+  const deleteDeck = (id: string) => {
+    persistDecks(decks.filter((d) => d.id !== id));
+    if (activeId === id) { setActiveId(null); saveActiveDeckId(null); }
+    if (editingId === id) startNewDeck();
+    setConfirmDel(null);
+  };
+  const startRename = (d: SavedDeck) => { setRenamingId(d.id); setRenameText(d.name); };
+  const commitRename = () => {
+    if (!renamingId) return;
+    const name = renameText.trim();
+    if (name) {
+      persistDecks(decks.map((d) => (d.id === renamingId ? { ...d, name } : d)));
+      if (editingId === renamingId) setDeckName(name);
+    }
+    setRenamingId(null);
+  };
   // ---------- 抉择处理 ----------
   // 确认夜影花蕾的模式:此时才真正支付费用并移出手牌;翻开牌库的牌后(bloomPick)不可再取消
   function pickBloomMode(mode: BloomMode) {
@@ -386,8 +457,12 @@ export default function ArcaneThrone() {
         <button onClick={openDeckBuilder} style={{ ...goldBtn, background: "rgba(0,0,0,.3)", border: "2px solid #8a6d3b", color: "#e8dcc0", boxShadow: "none" }}>
           构 建 牌 组
         </button>
-        <span style={{ fontSize: 11, color: "#9c9272" }}>
-          {playerDeck ? "⚔️ 对战将使用:自定义牌组(30 张)" : "⚔️ 对战将使用:随机牌组"}
+        <span style={{ fontSize: 11, color: activeDeck && !playerDeck ? "#e0a85c" : "#9c9272", textAlign: "center", maxWidth: 340 }}>
+          {playerDeck
+            ? `⚔️ 对战将使用:${activeDeck!.name}(30 张)`
+            : activeDeck
+            ? `⚠️ 牌组「${activeDeck.name}」不足 30 张,对战将使用随机牌组`
+            : "⚔️ 对战将使用:随机牌组"}
         </span>
       </div>
     );
@@ -399,65 +474,261 @@ export default function ArcaneThrone() {
     deckSel.forEach((id) => (counts[id] = (counts[id] || 0) + 1));
     const full = deckSel.length >= 30;
     const subBtn: CSSProperties = { padding: "7px 14px", borderRadius: 999, fontWeight: 700, fontSize: 12, cursor: "pointer", border: "1px solid #8a6d3b", background: "rgba(0,0,0,.3)", color: "#cdbf9a", fontFamily: "inherit" };
+    const nameInput: CSSProperties = { padding: "5px 10px", borderRadius: 8, border: "1px solid #8a6d3b", background: "rgba(0,0,0,.35)", color: "#f4e6c1", fontSize: 13, fontWeight: 700, fontFamily: "inherit", width: 150 };
+    const miniBtn: CSSProperties = { padding: "3px 8px", borderRadius: 7, fontSize: 11, fontWeight: 700, cursor: "pointer", border: "1px solid #8a6d3b", background: "rgba(0,0,0,.28)", color: "#cdbf9a", fontFamily: "inherit", lineHeight: 1.4 };
+    const nameColor = (c: typeof POOL[number]) => RARITY[c.rarity].color;
+    // 卡池分页:每页 20 张
+    const PAGE_SIZE = 20;
+    const sortedPool = [...POOL].sort((a, b) => a.cost - b.cost || a.id - b.id);
+    const pageCount = Math.max(1, Math.ceil(sortedPool.length / PAGE_SIZE));
+    const page = Math.min(poolPage, pageCount - 1);
+    const pagePool = sortedPool.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+
     return (
-      <div style={{ ...outer, overflowY: "auto", padding: "16px 12px" }}>
+      <div style={{ ...outer, padding: "12px" }}>
         <style>{CSS}</style>
-        <div style={{ width: "100%", maxWidth: 780, margin: "0 auto", display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-            <div style={{ fontSize: 20, fontWeight: 900, color: "#ffd700", textShadow: "0 1px 3px #000" }}>
-              🛠 构建牌组
-              <span style={{ marginLeft: 10, fontSize: 14, color: full ? "#5ef08a" : "#d8c89a" }}>{deckSel.length}/30</span>
+        <div style={{ width: "100%", maxWidth: 1120, margin: "0 auto", flex: 1, minHeight: 0, display: "flex", gap: 12 }}>
+          {/* ---------- 左:构建区 ---------- */}
+          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 18, fontWeight: 900, color: "#ffd700", textShadow: "0 1px 3px #000", whiteSpace: "nowrap" }}>
+                  🛠 {editingId ? "编辑牌组" : "新建牌组"}
+                </span>
+                <input
+                  value={deckName}
+                  maxLength={12}
+                  placeholder="牌组名称"
+                  onChange={(e) => setDeckName(e.target.value)}
+                  style={nameInput}
+                />
+                <span style={{ fontSize: 14, fontWeight: 800, color: full ? "#5ef08a" : "#d8c89a", whiteSpace: "nowrap" }}>{deckSel.length}/30</span>
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button onClick={() => setDeckSel([])} style={subBtn}>清空</button>
+                <button onClick={randomFill} style={subBtn}>随机补满</button>
+                <button
+                  onClick={saveDeck}
+                  disabled={!full}
+                  style={{ ...subBtn, fontWeight: 800, border: "2px solid " + (full ? "#f0d98c" : "#6b6452"), background: full ? "linear-gradient(180deg,#ffe08a,#c79a2e)" : "#4d4738", color: full ? "#4a3508" : "#9a937e", cursor: full ? "pointer" : "default" }}
+                >
+                  {editingId ? "更新牌组" : "保存牌组"}
+                </button>
+              </div>
             </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button onClick={() => setDeckSel([])} style={subBtn}>清空</button>
-              <button onClick={randomFill} style={subBtn}>随机补满</button>
+            <div style={{ fontSize: 11, color: deckMsg ? "#5ef08a" : "#bfae84", minHeight: 16 }}>
+              {deckMsg || "点击卡牌加入牌组(每种最多 2 张,传说卡每种最多 1 张),点击卡牌右下角 − 移除;选满 30 张后保存。"}
+            </div>
+            {/* 顶/左留出内边距,避免卡牌角标(费用/数量)被滚动容器裁切 */}
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "14px 14px 18px" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(132px,1fr))", gap: 20 }}>
+                {pagePool.map((c) => {
+                  const n = counts[c.id] || 0;
+                  const addable = !full && n < maxCopies(c);
+                  return (
+                    <div
+                      key={c.id}
+                      onClick={() => addCard(c.id)}
+                      style={{ position: "relative", height: 152, boxSizing: "border-box", display: "flex", flexDirection: "column", alignItems: "center", borderRadius: 10, padding: "12px 8px 14px", cursor: addable ? "pointer" : "default", textAlign: "center", background: c.type === "m" ? "linear-gradient(170deg,#7a5c33,#4a3517)" : "linear-gradient(170deg,#3d4f8a,#23284e)", border: n ? "2px solid #ffd700" : "2px solid " + (c.type === "m" ? "#caa45c" : "#7d90d8"), boxShadow: n ? "0 0 10px rgba(255,215,0,.3)" : "0 2px 5px rgba(0,0,0,.4)", opacity: addable || n ? 1 : 0.55 }}
+                    >
+                      <span style={{ position: "absolute", top: -7, left: -7, width: 22, height: 22, borderRadius: "50%", background: "radial-gradient(circle at 35% 30%,#9fd6ff,#1f63c4 60%,#0b3a7e)", border: "2px solid #cfe6ff", color: "#fff", fontSize: 12, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        {c.cost}
+                      </span>
+                      {n > 0 && (
+                        <div style={{ position: "absolute", top: -9, right: -7, display: "flex", alignItems: "center", gap: 4 }}>
+                          <span style={{ background: "#ffd700", color: "#4a3508", borderRadius: 999, fontSize: 11, fontWeight: 900, padding: "1px 7px", border: "1px solid #fff3c4" }}>×{n}</span>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); removeCard(c.id); }}
+                            style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid #e08a7c", background: "#9c3328", color: "#fff", fontWeight: 900, fontSize: 14, cursor: "pointer", lineHeight: 1, fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center" }}
+                          >
+                            −
+                          </button>
+                        </div>
+                      )}
+                      <div style={{ fontSize: 26 }}>{c.emoji}</div>
+                      <div style={{ color: c.rarity === "c" ? "#ffe9b0" : RARITY[c.rarity].color, fontWeight: 800, fontSize: 13, textShadow: "0 1px 2px #000" }}>{c.name}</div>
+                      <div style={{ color: RARITY[c.rarity].color, fontSize: 10, fontWeight: 800 }}>◆ {RARITY[c.rarity].label}</div>
+                      <div style={{ color: "#d8cdb2", fontSize: 10, marginTop: 3, lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{kw(c)}{c.desc}</div>
+                      {c.type === "m" && (
+                        <>
+                          <Badge pos="bl" v={c.atk!} bg="#b8860b" />
+                          <Badge pos="br" v={c.hp!} bg="#7f1d1d" />
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            {/* 卡池翻页 */}
+            <div style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 2 }}>
               <button
-                onClick={saveDeck}
-                disabled={!full}
-                style={{ ...subBtn, fontWeight: 800, border: "2px solid " + (full ? "#f0d98c" : "#6b6452"), background: full ? "linear-gradient(180deg,#ffe08a,#c79a2e)" : "#4d4738", color: full ? "#4a3508" : "#9a937e", cursor: full ? "pointer" : "default" }}
+                onClick={() => setPoolPage((p) => Math.max(0, p - 1))}
+                disabled={page <= 0}
+                style={{ ...subBtn, opacity: page <= 0 ? 0.4 : 1, cursor: page <= 0 ? "default" : "pointer" }}
               >
-                保存牌组
+                ‹ 上一页
               </button>
-              <button onClick={() => setGame({ phase: "menu" })} style={subBtn}>返回</button>
+              <span style={{ fontSize: 12, color: "#d8c89a", fontWeight: 700, minWidth: 84, textAlign: "center" }}>
+                第 {page + 1} / {pageCount} 页
+              </span>
+              <button
+                onClick={() => setPoolPage((p) => Math.min(pageCount - 1, p + 1))}
+                disabled={page >= pageCount - 1}
+                style={{ ...subBtn, opacity: page >= pageCount - 1 ? 0.4 : 1, cursor: page >= pageCount - 1 ? "default" : "pointer" }}
+              >
+                下一页 ›
+              </button>
             </div>
           </div>
-          <div style={{ fontSize: 11, color: "#bfae84" }}>点击卡牌加入牌组(每种最多 2 张,传说卡每种最多 1 张),点击卡牌右下角 − 移除;选满 30 张后保存,对战时使用该牌组。</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))", gap: 12, paddingBottom: 20 }}>
-            {[...POOL].sort((a, b) => a.cost - b.cost || a.id - b.id).map((c) => {
-              const n = counts[c.id] || 0;
-              const addable = !full && n < maxCopies(c);
-              return (
-                <div
-                  key={c.id}
-                  onClick={() => addCard(c.id)}
-                  style={{ position: "relative", borderRadius: 10, padding: "12px 8px 12px", cursor: addable ? "pointer" : "default", textAlign: "center", background: c.type === "m" ? "linear-gradient(170deg,#7a5c33,#4a3517)" : "linear-gradient(170deg,#3d4f8a,#23284e)", border: n ? "2px solid #ffd700" : "2px solid " + (c.type === "m" ? "#caa45c" : "#7d90d8"), boxShadow: n ? "0 0 10px rgba(255,215,0,.3)" : "0 2px 5px rgba(0,0,0,.4)", opacity: addable || n ? 1 : 0.55 }}
-                >
-                  <span style={{ position: "absolute", top: -7, left: -7, width: 22, height: 22, borderRadius: "50%", background: "radial-gradient(circle at 35% 30%,#9fd6ff,#1f63c4 60%,#0b3a7e)", border: "2px solid #cfe6ff", color: "#fff", fontSize: 12, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    {c.cost}
-                  </span>
-                  {n > 0 && (
-                    <span style={{ position: "absolute", top: -8, right: -6, background: "#ffd700", color: "#4a3508", borderRadius: 999, fontSize: 11, fontWeight: 900, padding: "1px 7px", border: "1px solid #fff3c4" }}>
-                      ×{n}
-                    </span>
-                  )}
-                  <div style={{ fontSize: 26 }}>{c.emoji}</div>
-                  <div style={{ color: c.rarity === "c" ? "#ffe9b0" : RARITY[c.rarity].color, fontWeight: 800, fontSize: 13, textShadow: "0 1px 2px #000" }}>{c.name}</div>
-                  <div style={{ color: RARITY[c.rarity].color, fontSize: 10, fontWeight: 800 }}>◆ {RARITY[c.rarity].label}</div>
-                  <div style={{ color: "#9fd6ff", fontSize: 11, fontWeight: 700 }}>{c.type === "m" ? `${c.atk} 攻 / ${c.hp} 血` : spSummary(c.sp)}</div>
-                  <div style={{ color: "#d8cdb2", fontSize: 10, marginTop: 2, lineHeight: 1.4 }}>{kw(c)}{c.desc}</div>
-                  {n > 0 && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); removeCard(c.id); }}
-                      style={{ position: "absolute", bottom: -9, right: -7, width: 24, height: 24, borderRadius: "50%", border: "1px solid #e08a7c", background: "#9c3328", color: "#fff", fontWeight: 900, fontSize: 14, cursor: "pointer", lineHeight: 1, fontFamily: "inherit" }}
-                    >
-                      −
-                    </button>
-                  )}
+
+          {/* ---------- 右:牌组列表 / 当前牌组实时预览 ---------- */}
+          <div style={{ width: 272, flexShrink: 0, display: "flex", flexDirection: "column", gap: 8, background: "rgba(0,0,0,.28)", border: "2px solid #8a6d3b", borderRadius: 12, padding: "10px 10px" }}>
+            {rightMode === "list" ? (
+              <>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <span style={{ fontSize: 15, fontWeight: 900, color: "#ffd700" }}>📚 我的牌组</span>
+                  <span style={{ fontSize: 12, color: decks.length >= MAX_DECKS ? "#e0a85c" : "#cdbf9a" }}>{decks.length}/{MAX_DECKS}</span>
                 </div>
-              );
-            })}
+                <button
+                  onClick={startNewDeck}
+                  disabled={decks.length >= MAX_DECKS && !editingId}
+                  title={decks.length >= MAX_DECKS ? `最多 ${MAX_DECKS} 个牌组` : "新建一副空白牌组"}
+                  style={{ ...subBtn, width: "100%", fontWeight: 800, opacity: decks.length >= MAX_DECKS && !editingId ? 0.5 : 1, cursor: decks.length >= MAX_DECKS && !editingId ? "default" : "pointer" }}
+                >
+                  ✚ 新建牌组
+                </button>
+                <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+                  {decks.length === 0 && (
+                    <div style={{ color: "#8f8568", fontSize: 12, textAlign: "center", padding: "20px 6px", lineHeight: 1.8 }}>
+                      还没有保存的牌组。<br />点击「新建牌组」后在左侧选满 30 张并保存。
+                    </div>
+                  )}
+                  {decks.map((d) => {
+                    const isActive = d.id === activeId;
+                    const isEditing = d.id === editingId;
+                    const complete = d.cards.length === 30;
+                    return (
+                      <div
+                        key={d.id}
+                        style={{ borderRadius: 10, padding: "8px 9px", background: isEditing ? "rgba(255,215,0,.12)" : "rgba(0,0,0,.3)", border: "1px solid " + (isActive ? "#ffd700" : "#6b5a36"), boxShadow: isActive ? "0 0 8px rgba(255,215,0,.25)" : "none" }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                          {renamingId === d.id ? (
+                            <input
+                              autoFocus
+                              value={renameText}
+                              maxLength={12}
+                              onChange={(e) => setRenameText(e.target.value)}
+                              onBlur={commitRename}
+                              onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingId(null); }}
+                              style={{ ...nameInput, width: "100%", padding: "3px 7px", fontSize: 12 }}
+                            />
+                          ) : (
+                            <span style={{ fontSize: 13, fontWeight: 800, color: "#f4e6c1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {isActive && <span title="对战牌组" style={{ color: "#ffd700", marginRight: 3 }}>★</span>}
+                              {d.name}
+                            </span>
+                          )}
+                          <span style={{ fontSize: 11, fontWeight: 700, color: complete ? "#7fd89a" : "#e0a85c", whiteSpace: "nowrap" }}>
+                            {d.cards.length}/30
+                          </span>
+                        </div>
+                        {!complete && renamingId !== d.id && (
+                          <div style={{ fontSize: 10, color: "#e0a85c", marginTop: 2 }}>⚠️ 未完成,无法用于对战</div>
+                        )}
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 7 }}>
+                          <button onClick={() => editDeck(d)} style={{ ...miniBtn, ...(isEditing ? { borderColor: "#ffd700", color: "#ffe9b0" } : {}) }}>✏️ 编辑</button>
+                          <button onClick={() => startRename(d)} style={miniBtn}>🏷 重命名</button>
+                          <button onClick={() => setConfirmDel(d.id)} style={{ ...miniBtn, borderColor: "#a85040", color: "#e6a89c" }}>🗑 删除</button>
+                          <button
+                            onClick={() => complete && setActive(d.id)}
+                            disabled={!complete || isActive}
+                            title={complete ? "设为对战牌组" : "需满 30 张"}
+                            style={{ ...miniBtn, width: "100%", fontWeight: 800, ...(isActive ? { borderColor: "#ffd700", color: "#ffd700", background: "rgba(255,215,0,.12)" } : {}), opacity: !complete ? 0.45 : 1, cursor: !complete || isActive ? "default" : "pointer" }}
+                          >
+                            {isActive ? "★ 当前对战牌组" : "设为对战牌组"}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <button onClick={() => setGame({ phase: "menu" })} style={{ ...subBtn, width: "100%" }}>返回主菜单</button>
+              </>
+            ) : (
+              <>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                  <button onClick={() => { setRightMode("list"); setHovPrevCid(null); }} style={{ ...miniBtn, whiteSpace: "nowrap" }}>← 牌组列表</button>
+                  <span style={{ fontSize: 12, fontWeight: 800, color: full ? "#7fd89a" : "#e0a85c", whiteSpace: "nowrap" }}>{deckSel.length}/30</span>
+                </div>
+                <div style={{ fontSize: 14, fontWeight: 900, color: "#ffd700", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  👁 {deckName.trim() || (editingId ? "" : "新建牌组")}
+                </div>
+                <div style={{ fontSize: 11, color: "#bfae84" }}>点击卡牌移除一张</div>
+                <div
+                  onMouseLeave={() => setHovPrevCid(null)}
+                  style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}
+                >
+                  {deckSel.length === 0 && (
+                    <div style={{ color: "#8f8568", fontSize: 12, textAlign: "center", padding: "20px 6px", lineHeight: 1.8 }}>牌组为空,<br />点击左侧卡牌加入。</div>
+                  )}
+                  {(() => {
+                    const pc: Record<number, number> = {};
+                    deckSel.forEach((id) => (pc[id] = (pc[id] || 0) + 1));
+                    return Object.keys(pc)
+                      .map(Number)
+                      .map((id) => ({ c: byId[id], n: pc[id] }))
+                      .sort((a, b) => a.c.cost - b.c.cost || a.c.id - b.c.id)
+                      .map(({ c, n }) => (
+                        <div
+                          key={c.id}
+                          onMouseEnter={() => setHovPrevCid(c.id)}
+                          onClick={() => removeCard(c.id)}
+                          title="点击移除一张"
+                          style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", borderRadius: 8, cursor: "pointer", background: hovPrevCid === c.id ? "rgba(255,80,60,.18)" : "rgba(0,0,0,.32)", border: "1px solid " + (hovPrevCid === c.id ? "#e08a7c" : "#5a5030") }}
+                        >
+                          <span style={{ width: 18, height: 18, flexShrink: 0, borderRadius: "50%", background: "radial-gradient(circle at 35% 30%,#9fd6ff,#1f63c4 60%,#0b3a7e)", border: "1px solid #cfe6ff", color: "#fff", fontSize: 10, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center" }}>{c.cost}</span>
+                          <span style={{ fontSize: 18, flexShrink: 0 }}>{c.emoji}</span>
+                          <span style={{ flex: 1, fontSize: 13, fontWeight: 700, color: nameColor(c), overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textShadow: "0 1px 2px #000" }}>{c.name}</span>
+                          {n > 1 && <span style={{ fontSize: 12, fontWeight: 900, color: "#ffd700", flexShrink: 0 }}>×{n}</span>}
+                          <span style={{ fontSize: 14, fontWeight: 900, color: "#e08a7c", flexShrink: 0 }}>−</span>
+                        </div>
+                      ));
+                  })()}
+                </div>
+                <button
+                  onClick={saveDeck}
+                  disabled={!full}
+                  style={{ ...subBtn, width: "100%", fontWeight: 800, border: "2px solid " + (full ? "#f0d98c" : "#6b6452"), background: full ? "linear-gradient(180deg,#ffe08a,#c79a2e)" : "#4d4738", color: full ? "#4a3508" : "#9a937e", cursor: full ? "pointer" : "default" }}
+                >
+                  {editingId ? "更新牌组" : "保存牌组"}
+                </button>
+              </>
+            )}
           </div>
         </div>
+
+        {/* ---------- 删除确认 ---------- */}
+        {confirmDel && (
+          <div onClick={() => setConfirmDel(null)} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 70, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: "linear-gradient(170deg,#3a2a14,#241a0a)", border: "2px solid #8a6d3b", borderRadius: 14, padding: "20px 26px", textAlign: "center", maxWidth: 280, boxShadow: "0 8px 24px rgba(0,0,0,.7)" }}>
+              <div style={{ fontSize: 32 }}>🗑</div>
+              <div style={{ color: "#f4e6c1", fontSize: 15, fontWeight: 800, margin: "8px 0 4px" }}>
+                删除「{decks.find((d) => d.id === confirmDel)?.name}」?
+              </div>
+              <div style={{ color: "#bfae84", fontSize: 12, marginBottom: 16 }}>此操作无法撤销</div>
+              <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+                <button onClick={() => deleteDeck(confirmDel)} style={{ padding: "8px 20px", borderRadius: 999, fontWeight: 800, fontSize: 13, cursor: "pointer", border: "2px solid #e08a7c", background: "linear-gradient(180deg,#d96a58,#9c3328)", color: "#fff", fontFamily: "inherit" }}>
+                  删除
+                </button>
+                <button onClick={() => setConfirmDel(null)} style={{ padding: "8px 20px", borderRadius: 999, fontWeight: 800, fontSize: 13, cursor: "pointer", border: "1px solid #8a6d3b", background: "none", color: "#cdbf9a", fontFamily: "inherit" }}>
+                  取消
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
