@@ -2,7 +2,7 @@
 import { useState, useRef, useEffect, type CSSProperties } from "react";
 import {
   POOL, RARITY, byId, maxCopies, HAND_LIMIT, kw, cardDesc, spTarget,
-  MAX_DECKS, loadDecks, saveDecks, loadActiveDeckId, saveActiveDeckId, genDeckId, type SavedDeck,
+  MAX_DECKS, loadDecks, saveDecks, loadActiveDeckId, saveActiveDeckId, loadAiDeckId, saveAiDeckId, genDeckId, type SavedDeck,
   CLASS_IDS, CLASS_META, HERO_POWER_COST, cardInClass, isNeutral,
 } from "./cards";
 import {
@@ -37,6 +37,9 @@ export default function ArcaneThrone() {
   const [confirmSurrender, setConfirmSurrender] = useState(false);
   const [decks, setDecks] = useState<SavedDeck[]>(loadDecks);
   const [activeId, setActiveId] = useState<string | null>(loadActiveDeckId);
+  const [aiDeckId, setAiDeckIdState] = useState<string | null>(loadAiDeckId);
+  const [showStartOpts, setShowStartOpts] = useState(false); // 主菜单「开始对战」二选一弹窗
+  const [aiPick, setAiPick] = useState(false); // 牌组构建界面处于「为 AI 选牌」模式
   const [deckSel, setDeckSel] = useState<number[]>([]);
   const [poolPage, setPoolPage] = useState(0); // 卡池分页(每页 20 张)
   const [editingId, setEditingId] = useState<string | null>(null); // 当前编辑的牌组(null = 新建)
@@ -47,15 +50,21 @@ export default function ArcaneThrone() {
   const [deckTab, setDeckTab] = useState<DeckTab>("druid"); // 卡池筛选标签
   const [choosingClass, setChoosingClass] = useState(false); // 新建牌组:职业选择界面
   const [hovPrevCid, setHovPrevCid] = useState<number | null>(null);
+  const [hovPrevY, setHovPrevY] = useState(0); // 悬停卡牌行相对右侧面板顶部的偏移,详情卡据此对齐
+  const rightPanelRef = useRef<HTMLDivElement>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
   const [confirmDel, setConfirmDel] = useState<string | null>(null);
   const [pointer, setPointer] = useState<{ x: number; y: number } | null>(null); // 瞄准箭头:光标位置(viewport 坐标)
   const aimFrom = useRef<{ x: number; y: number } | null>(null); // 瞄准箭头:源单位中心
   const aiSnaps = useRef<GameState[]>([]); // 当前 AI 回合的快照序列(供"跳过"快进)
+  const lastAi = useRef<SavedDeck | null>(null); // 本局 AI 所用指定牌组(供「再来一局」复用),null = 随机
   // 激活牌组;仅当满 30 张时用于对战,否则对战使用随机牌组
   const activeDeck = decks.find((d) => d.id === activeId) || null;
   const playerDeck = activeDeck && activeDeck.cards.length === 30 ? activeDeck.cards : null;
+  // 为 AI 指定的牌组(同样取自「我的牌组」);仅满 30 张时用于对战
+  const aiDeck = decks.find((d) => d.id === aiDeckId) || null;
+  const aiPlayDeck = aiDeck && aiDeck.cards.length === 30 ? aiDeck.cards : null;
   const gameRef = useRef(game);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
@@ -123,14 +132,18 @@ export default function ArcaneThrone() {
       return st;
     });
 
-  const start = () => {
+  // ai 参数:为 AI 指定的牌组(及其职业);缺省则 AI 使用随机牌组
+  const start = (ai?: SavedDeck | null) => {
     timers.current.forEach(clearTimeout);
     timers.current = [];
     setSelHand(null); setSelAtk(null); setSelHeroAtk(false); setHint(null);
     setHovHand(null); setInspect(null); setShowLog(false);
     setConfirmSurrender(false);
+    setShowStartOpts(false); setAiPick(false);
+    lastAi.current = ai ?? null;
     // 对战牌组完整时用其职业;否则随机牌组,职业由引擎随机选取
-    const st = initGame(playerDeck, playerDeck ? activeDeck!.classId : undefined);
+    const aiCards = ai && ai.cards.length === 30 ? ai.cards : null;
+    const st = initGame(playerDeck, playerDeck ? activeDeck!.classId : undefined, undefined, aiCards, aiCards ? ai!.classId : undefined);
     if (st.turn === "a") runAiTurn(st);
     else setGame(st);
   };
@@ -185,6 +198,15 @@ export default function ArcaneThrone() {
     exitBuild();
     setDeckTab("druid");
     setRenamingId(null); setConfirmDel(null); setDeckMsg("");
+    setAiPick(false);
+    setGame({ phase: "deck" });
+  };
+  // 从「开始对战 → 指定牌组」进入构建界面,处于「为 AI 选牌」模式
+  const openAiDeckPicker = () => {
+    exitBuild();
+    setDeckTab("druid");
+    setRenamingId(null); setConfirmDel(null); setDeckMsg("");
+    setShowStartOpts(false); setAiPick(true);
     setGame({ phase: "deck" });
   };
   // 点击"新建牌组":先进入职业选择界面
@@ -199,6 +221,7 @@ export default function ArcaneThrone() {
   };
   const persistDecks = (next: SavedDeck[]) => { setDecks(next); saveDecks(next); };
   const setActive = (id: string) => { setActiveId(id); saveActiveDeckId(id); };
+  const setAiDeck = (id: string) => { setAiDeckIdState(id); saveAiDeckId(id); };
 
   // 仅在构建态(buildClass 非空)可加牌,且卡牌须属当前职业可用
   const addCard = (id: number) =>
@@ -610,7 +633,7 @@ export default function ArcaneThrone() {
 
         {/* 操作按钮列 */}
         <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 14, width: 220 }}>
-          <button onClick={start} style={{ ...goldBtn, width: "100%" }}>开 始 对 战</button>
+          <button onClick={() => setShowStartOpts(true)} style={{ ...goldBtn, width: "100%" }}>开 始 对 战</button>
           <button onClick={openDeckBuilder} style={{ ...goldBtn, width: "100%", background: "rgba(0,0,0,.3)", border: "2px solid #8a6d3b", color: "#e8dcc0", boxShadow: "none" }}>
             构 建 牌 组
           </button>
@@ -665,6 +688,42 @@ export default function ArcaneThrone() {
             </div>
           </div>
         )}
+
+        {/* 开始对战:AI 牌组二选一 */}
+        {showStartOpts && (
+          <div
+            onClick={() => setShowStartOpts(false)}
+            style={{ position: "fixed", inset: 0, zIndex: 90, background: "rgba(0,0,0,.72)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{ width: "min(380px,94vw)", background: "linear-gradient(170deg,#2c3320,#1a2010)", border: "2px solid #8a6d3b", borderRadius: 16, padding: "22px 22px", boxShadow: "0 12px 40px rgba(0,0,0,.7)", textAlign: "center" }}
+            >
+              <div style={{ color: "#ffd700", fontWeight: 900, fontSize: 18, letterSpacing: 2, marginBottom: 4 }}>⚔️ 选择对手牌组</div>
+              <div style={{ color: "#bfae84", fontSize: 12, marginBottom: 18 }}>AI 将使用以下牌组与你对战</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <button onClick={() => start()} style={{ ...goldBtn, width: "100%" }}>🎲 随 机 牌 组</button>
+                <button
+                  onClick={openAiDeckPicker}
+                  style={{ ...goldBtn, width: "100%", background: "rgba(0,0,0,.3)", border: "2px solid #8a6d3b", color: "#e8dcc0", boxShadow: "none" }}
+                >
+                  🎯 指 定 牌 组
+                </button>
+              </div>
+              {aiPlayDeck && (
+                <div style={{ fontSize: 11, color: "#9c9272", marginTop: 12 }}>
+                  上次为 AI 选择:{aiDeck!.name}({CLASS_META[aiDeck!.classId].name})
+                </div>
+              )}
+              <button
+                onClick={() => setShowStartOpts(false)}
+                style={{ marginTop: 16, padding: "7px 20px", borderRadius: 999, fontWeight: 700, fontSize: 12, cursor: "pointer", border: "1px solid #8a6d3b", background: "none", color: "#cdbf9a", fontFamily: "inherit" }}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -696,6 +755,11 @@ export default function ArcaneThrone() {
     return (
       <div style={{ ...outer, padding: "12px" }}>
         <style>{CSS}</style>
+        {aiPick && (
+          <div style={{ width: "100%", maxWidth: 1120, margin: "0 auto 10px", padding: "8px 14px", borderRadius: 10, background: "rgba(120,40,40,.28)", border: "1px solid #a85040", color: "#f0d2c4", fontSize: 13, fontWeight: 700, textAlign: "center" }}>
+            🎯 正在为 AI 对手选择牌组 — 在右侧「我的牌组」中选定或新建一副,再点「⚔️ 用此牌组开战」
+          </div>
+        )}
         <div style={{ width: "100%", maxWidth: 1120, margin: "0 auto", flex: 1, minHeight: 0, display: "flex", gap: 12 }}>
           {/* ---------- 左:构建区 ---------- */}
           <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 10 }}>
@@ -826,10 +890,10 @@ export default function ArcaneThrone() {
           </div>
 
           {/* ---------- 右:牌组列表 / 当前牌组实时预览 ---------- */}
-          <div style={{ position: "relative", width: 272, flexShrink: 0, display: "flex", flexDirection: "column", gap: 8, background: "rgba(0,0,0,.28)", border: "2px solid #8a6d3b", borderRadius: 12, padding: "10px 10px" }}>
+          <div ref={rightPanelRef} style={{ position: "relative", width: 272, flexShrink: 0, display: "flex", flexDirection: "column", gap: 8, background: "rgba(0,0,0,.28)", border: "2px solid #8a6d3b", borderRadius: 12, padding: "10px 10px" }}>
             {/* 预览时悬停卡牌行,在面板左侧显示卡牌详情 */}
             {rightMode === "preview" && hovPrevCard && (
-              <div style={{ position: "absolute", right: "100%", top: 0, marginRight: 12, zIndex: 80, width: 156, borderRadius: 12, padding: "10px 8px", background: hovPrevCard.type === "m" ? "linear-gradient(170deg,#7a5c33,#3c2b12)" : "linear-gradient(170deg,#3d4f8a,#1d2244)", border: "2px solid #ffd700", boxShadow: "0 8px 24px rgba(0,0,0,.7)", textAlign: "center", pointerEvents: "none" }}>
+              <div style={{ position: "absolute", right: "100%", top: Math.max(0, Math.min(hovPrevY, (rightPanelRef.current?.clientHeight ?? 999) - 168)), marginRight: 12, zIndex: 80, width: 156, borderRadius: 12, padding: "10px 8px", background: hovPrevCard.type === "m" ? "linear-gradient(170deg,#7a5c33,#3c2b12)" : "linear-gradient(170deg,#3d4f8a,#1d2244)", border: "2px solid #ffd700", boxShadow: "0 8px 24px rgba(0,0,0,.7)", textAlign: "center", pointerEvents: "none" }}>
                 <div style={{ fontSize: 34 }}>{hovPrevCard.emoji}</div>
                 <div style={{ color: hovPrevCard.rarity === "c" ? "#ffe9b0" : RARITY[hovPrevCard.rarity].color, fontWeight: 800, fontSize: 14, textShadow: "0 1px 2px #000" }}>{hovPrevCard.name}</div>
                 <div style={{ color: RARITY[hovPrevCard.rarity].color, fontSize: 10, fontWeight: 800 }}>◆ {RARITY[hovPrevCard.rarity].label}</div>
@@ -863,10 +927,12 @@ export default function ArcaneThrone() {
                     const isActive = d.id === activeId;
                     const isEditing = d.id === editingId;
                     const complete = d.cards.length === 30;
+                    // aiPick 模式下高亮/标记的是「AI 牌组」,否则是玩家「对战牌组」
+                    const marked = aiPick ? d.id === aiDeckId : isActive;
                     return (
                       <div
                         key={d.id}
-                        style={{ borderRadius: 10, padding: "8px 9px", background: isEditing ? "rgba(255,215,0,.12)" : "rgba(0,0,0,.3)", border: "1px solid " + (isActive ? "#ffd700" : "#6b5a36"), boxShadow: isActive ? "0 0 8px rgba(255,215,0,.25)" : "none" }}
+                        style={{ borderRadius: 10, padding: "8px 9px", background: isEditing ? "rgba(255,215,0,.12)" : "rgba(0,0,0,.3)", border: "1px solid " + (marked ? "#ffd700" : "#6b5a36"), boxShadow: marked ? "0 0 8px rgba(255,215,0,.25)" : "none" }}
                       >
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
                           {renamingId === d.id ? (
@@ -881,7 +947,7 @@ export default function ArcaneThrone() {
                             />
                           ) : (
                             <span style={{ fontSize: 13, fontWeight: 800, color: "#f4e6c1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {isActive && <span title="对战牌组" style={{ color: "#ffd700", marginRight: 3 }}>★</span>}
+                              {marked && <span title={aiPick ? "AI 牌组" : "对战牌组"} style={{ color: "#ffd700", marginRight: 3 }}>{aiPick ? "🤖" : "★"}</span>}
                               {d.name}
                             </span>
                           )}
@@ -900,19 +966,31 @@ export default function ArcaneThrone() {
                           <button onClick={() => startRename(d)} style={miniBtn}>🏷 重命名</button>
                           <button onClick={() => setConfirmDel(d.id)} style={{ ...miniBtn, borderColor: "#a85040", color: "#e6a89c" }}>🗑 删除</button>
                           <button
-                            onClick={() => complete && setActive(d.id)}
-                            disabled={!complete || isActive}
-                            title={complete ? "设为对战牌组" : "需满 30 张"}
-                            style={{ ...miniBtn, width: "100%", fontWeight: 800, ...(isActive ? { borderColor: "#ffd700", color: "#ffd700", background: "rgba(255,215,0,.12)" } : {}), opacity: !complete ? 0.45 : 1, cursor: !complete || isActive ? "default" : "pointer" }}
+                            onClick={() => complete && (aiPick ? setAiDeck(d.id) : setActive(d.id))}
+                            disabled={!complete || marked}
+                            title={complete ? (aiPick ? "选为 AI 牌组" : "设为对战牌组") : "需满 30 张"}
+                            style={{ ...miniBtn, width: "100%", fontWeight: 800, ...(marked ? { borderColor: "#ffd700", color: "#ffd700", background: "rgba(255,215,0,.12)" } : {}), opacity: !complete ? 0.45 : 1, cursor: !complete || marked ? "default" : "pointer" }}
                           >
-                            {isActive ? "★ 当前对战牌组" : "设为对战牌组"}
+                            {aiPick
+                              ? (marked ? "🤖 AI 对手牌组" : "选为 AI 牌组")
+                              : (isActive ? "★ 当前对战牌组" : "设为对战牌组")}
                           </button>
                         </div>
                       </div>
                     );
                   })}
                 </div>
-                <button onClick={() => setGame({ phase: "menu" })} style={{ ...subBtn, width: "100%" }}>返回主菜单</button>
+                {aiPick && (
+                  <button
+                    onClick={() => aiPlayDeck && start(aiDeck)}
+                    disabled={!aiPlayDeck}
+                    title={aiPlayDeck ? "用所选 AI 牌组开始对战" : "请先为 AI 选择一副满 30 张的牌组"}
+                    style={{ ...subBtn, width: "100%", fontWeight: 800, border: "2px solid " + (aiPlayDeck ? "#f0d98c" : "#6b6452"), background: aiPlayDeck ? "linear-gradient(180deg,#ffe08a,#c79a2e)" : "#4d4738", color: aiPlayDeck ? "#4a3508" : "#9a937e", cursor: aiPlayDeck ? "pointer" : "default" }}
+                  >
+                    ⚔️ 用此牌组开战
+                  </button>
+                )}
+                <button onClick={() => { setAiPick(false); setGame({ phase: "menu" }); }} style={{ ...subBtn, width: "100%" }}>返回主菜单</button>
               </>
             ) : (
               <>
@@ -921,7 +999,7 @@ export default function ArcaneThrone() {
                   <span style={{ fontSize: 12, fontWeight: 800, color: full ? "#7fd89a" : "#e0a85c", whiteSpace: "nowrap" }}>{deckSel.length}/30</span>
                 </div>
                 <div style={{ fontSize: 14, fontWeight: 900, color: "#ffd700", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  👁 {deckName.trim() || (editingId ? "" : "新建牌组")}
+                  🃏 {deckName.trim() || (editingId ? "" : "新建牌组")}
                 </div>
                 {buildClass && <div style={{ fontSize: 11, fontWeight: 700, color: "#cdbf9a" }}>{CLASS_META[buildClass].emoji} {CLASS_META[buildClass].name}</div>}
                 <div style={{ fontSize: 11, color: "#bfae84" }}>悬停查看详情 · 点击移除一张</div>
@@ -942,7 +1020,11 @@ export default function ArcaneThrone() {
                       .map(({ c, n }) => (
                         <div
                           key={c.id}
-                          onMouseEnter={() => setHovPrevCid(c.id)}
+                          onMouseEnter={(e) => {
+                            const panel = rightPanelRef.current;
+                            if (panel) setHovPrevY(e.currentTarget.getBoundingClientRect().top - panel.getBoundingClientRect().top);
+                            setHovPrevCid(c.id);
+                          }}
                           onClick={() => removeCard(c.id)}
                           title="点击移除一张"
                           style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", borderRadius: 8, cursor: "pointer", background: hovPrevCid === c.id ? "rgba(255,80,60,.18)" : "rgba(0,0,0,.32)", border: "1px solid " + (hovPrevCid === c.id ? "#e08a7c" : "#5a5030") }}
@@ -1412,7 +1494,7 @@ export default function ArcaneThrone() {
             {game.winner === "p" ? "获胜！你的对手被击败了!" : game.surrendered ? "你选择了认输……重整旗鼓,下次再战!" : "你倒下了……下次再战!"}
             <br />(共进行 {game.turnNum} 个回合)
           </span>
-          <button onClick={start} style={goldBtn}>再 来 一 局</button>
+          <button onClick={() => start(lastAi.current)} style={goldBtn}>再 来 一 局</button>
           <button onClick={() => setGame({ phase: "menu" })} style={{ background: "none", border: "1px solid #8a6d3b", borderRadius: 999, color: "#cdbf9a", padding: "8px 20px", fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
             返回主菜单
           </button>

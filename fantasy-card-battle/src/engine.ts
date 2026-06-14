@@ -833,7 +833,7 @@ export function useHeroPower(st: GameState, side: Side): boolean {
 }
 
 // seed 缺省取系统熵;测试传入固定 seed 即可复现整局。
-export function initGame(playerDeck: number[] | null = null, playerClass?: ClassId, seed: number = (Date.now() ^ (Math.random() * 0x100000000)) | 0): GameState {
+export function initGame(playerDeck: number[] | null = null, playerClass?: ClassId, seed: number = (Date.now() ^ (Math.random() * 0x100000000)) | 0, aiDeck: number[] | null = null, aiClass?: ClassId): GameState {
   const st: GameState = {
     phase: "play", turn: "p", first: "p", turnNum: 0, winner: null, rngState: seed | 0, fx: [], logs: [], notice: null, pending: null,
     lastLog: "", banner: null,
@@ -849,11 +849,11 @@ export function initGame(playerDeck: number[] | null = null, playerClass?: Class
   st.banner = { text: first === "p" ? "你是先手!" : "对手先手", id: Date.now() };
   // 玩家职业取所选牌组的职业(随机牌组时随机一个);AI 随机一个职业并按职业建库
   const pClass: ClassId = playerClass || randPick(st, CLASS_IDS);
-  const aClass: ClassId = randPick(st, CLASS_IDS);
+  const aClass: ClassId = aiClass || randPick(st, CLASS_IDS);
   st.p.classId = pClass;
   st.a.classId = aClass;
   st.p.deck = playerDeck ? shuffle([...playerDeck], rng) : buildDeck(rng, pClass);
-  st.a.deck = buildDeck(rng, aClass);
+  st.a.deck = aiDeck ? shuffle([...aiDeck], rng) : buildDeck(rng, aClass);
   log(st, first === "p"
     ? "你获得先手!点击手牌查看,再次点击打出。"
     : "对手获得先手,你作为后手多抽一张牌并获得「幸运币」。");

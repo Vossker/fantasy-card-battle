@@ -197,3 +197,12 @@ export function loadActiveDeckId(): string | null {
 export function saveActiveDeckId(id: string | null): void {
   try { id ? localStorage.setItem(ACTIVE_KEY, id) : localStorage.removeItem(ACTIVE_KEY); } catch {}
 }
+
+// AI 指定牌组:记住上次为 AI 选择的牌组(与玩家对战牌组各存一处)
+const AI_DECK_KEY = "arcane-ai-deck";
+export function loadAiDeckId(): string | null {
+  try { return localStorage.getItem(AI_DECK_KEY); } catch { return null; }
+}
+export function saveAiDeckId(id: string | null): void {
+  try { id ? localStorage.setItem(AI_DECK_KEY, id) : localStorage.removeItem(AI_DECK_KEY); } catch {}
+}
