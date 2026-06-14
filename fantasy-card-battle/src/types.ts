@@ -2,6 +2,7 @@
 
 export type Side = "p" | "a";
 export type Rarity = "c" | "r" | "e" | "l";
+export type ClassId = "druid" | "rogue"; // 职业;卡牌 classes 为空/缺省 = 中立(所有职业可用)
 export type SpellTargetKind = "any" | "fm";
 export type BloomMode = "m" | "s";
 export type CampOpt = "mana" | "draw" | "armor";
@@ -45,6 +46,7 @@ interface CardBase {
   rarity: Rarity;
   desc: string;
   token?: 1;
+  classes?: ClassId[]; // 所属职业(可多个);缺省/空数组 = 中立,任意职业可选用
 }
 
 // 互斥字段声明为 `?: undefined`,这样在 Card 上可以直接访问 c.sp / c.atk 而无需先收窄
@@ -59,6 +61,7 @@ export interface MinionCard extends CardBase {
   bc?: { k: "summonMini" } | { k: "greedyCoin" } | { k: "loatheb" };
   costScale?: "spellsPlayed"; // 奥术巨人:每使用过一张法术,费用 -1(下限 0)
   inheritStats?: 1; // 属性继承型 token(如舞者):卡面 atk/hp 仅占位,被街舞起跳弹回手牌时记录属性快照
+  dur?: undefined;
   sp?: undefined;
 }
 
@@ -67,6 +70,7 @@ export interface SpellCard extends CardBase {
   sp: SpellDef;
   atk?: undefined;
   hp?: undefined;
+  dur?: undefined;
   taunt?: undefined;
   charge?: undefined;
   rush?: undefined;
@@ -74,7 +78,23 @@ export interface SpellCard extends CardBase {
   bc?: undefined;
 }
 
-export type Card = MinionCard | SpellCard;
+// 武器牌:英雄装备后获得攻击力,可攻击随从/英雄,每次攻击消耗 1 点耐久,耐久归 0 销毁
+export interface WeaponCard extends CardBase {
+  type: "w";
+  atk: number;
+  dur: number;
+  hp?: undefined;
+  taunt?: undefined;
+  charge?: undefined;
+  rush?: undefined;
+  aura?: undefined;
+  bc?: undefined;
+  costScale?: undefined;
+  inheritStats?: undefined;
+  sp?: undefined;
+}
+
+export type Card = MinionCard | SpellCard | WeaponCard;
 
 export interface HandEntry {
   uid: number;
@@ -106,11 +126,16 @@ export interface Minion {
 }
 
 export interface SideState {
+  classId?: ClassId; // 本方英雄职业(决定英雄技能);对局内固定
   hp: number;
   armor: number;
   mana: number;
   maxMana: number;
   fatigue: number;
+  weapon?: { cid: number; atk: number; dur: number } | null; // 当前装备的武器(null/缺省 = 无)
+  heroAtk?: number; // 英雄临时攻击力加成(德鲁伊变形),仅当回合(startTurn 清零)
+  heroAttacked?: boolean; // 本回合英雄是否已用攻击力发起过攻击(startTurn 清零)
+  heroPowerUsed?: boolean; // 本回合是否已使用英雄技能(startTurn 清零)
   spellDmg: number; // 法伤加成,仅持续当前回合(startTurn 时双方清零)
   spellDiscount?: number; // 伺机待发:下一张法术减费量,仅本回合(startTurn 时本方清零)
   spellsPlayed?: number; // 本局从手牌打出的法术总数(奥术巨人减费用)

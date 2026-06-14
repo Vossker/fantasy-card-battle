@@ -1,9 +1,9 @@
 // ================= 规则引擎(纯函数,不碰 React) =================
 // 所有函数签名形如 fn(st, side, ...):直接修改传入的 state 对象 st,side 为 "p"(玩家)或 "a"(AI)
-import { COIN, DANCER, HAND_LIMIT, buildDeck, byId, shuffle, spTarget } from "./cards";
+import { CLASS_IDS, COIN, DAGGER, DANCER, HAND_LIMIT, HERO_POWER_COST, buildDeck, byId, shuffle, spTarget } from "./cards";
 import type {
-  AttackTarget, BloomMode, Card, CampOpt, ChooseOpt, GameState, HandEntry,
-  MinionCard, Side, SpellDef, SpellTarget,
+  AttackTarget, BloomMode, Card, CampOpt, ChooseOpt, ClassId, GameState, HandEntry,
+  MinionCard, Side, SideState, SpellDef, SpellTarget,
 } from "./types";
 
 // 模块级自增全局变量:HMR 热更新后继续累加,不要假设从 1 开始
@@ -98,6 +98,9 @@ export function startTurn(st: GameState, side: Side) {
   s.playedThisTurn = 0; // 连击:本回合已出牌数清零
   s.spellTax = s.spellTaxNext; // 洛欧塞布:回合开始时把已挂载的加税转为生效;无挂载则顺带清除上一回合的加税
   s.spellTaxNext = undefined;
+  s.heroAtk = 0; // 变形临时攻击力:仅当回合
+  s.heroAttacked = false; // 英雄本回合可再次攻击
+  s.heroPowerUsed = false; // 英雄技能本回合可再次使用
   s.maxMana = Math.min(10, s.maxMana + 1);
   s.mana = s.maxMana;
   // 登场窗口结束:冲锋/突袭是一次性登场效果,熬过登场回合后清掉(角标随之消失)
@@ -231,7 +234,7 @@ export function sampleDeckAny(st: GameState, side: Side): number[] {
 //   法术 — 伊谢尔光环(费用一律变为 1)优先级高于伺机待发减费:光环在场时直接固定为 1(含 0 费牌),不再叠加减费;
 //          无光环时按伺机待发减费,下限 0;
 //   随从 — costScale 随从(奥术巨人)按本方已打出法术数减费,下限 0。
-export const effCost = (st: GameState, side: Side, c: { type: "m" | "s"; cost: number; costScale?: "spellsPlayed" }, en?: HandEntry): number => {
+export const effCost = (st: GameState, side: Side, c: { type: "m" | "s" | "w"; cost: number; costScale?: "spellsPlayed" }, en?: HandEntry): number => {
   const s = st[side];
   if (c.type === "s") {
     // 伊谢尔光环(变 1)与洛欧塞布加税(+amt)可能同时存在,按入场先后裁决:后入场覆盖先入场。
@@ -741,13 +744,101 @@ export function resolveAttack(st: GameState, side: Side, auid: number, tgt: Atta
   return true;
 }
 
+// ================= 武器 / 英雄攻击 / 英雄技能 =================
+// 英雄当前总攻击力 = 武器攻击 + 临时攻击力加成(变形)
+export const heroAtkVal = (s: SideState): number => (s.weapon?.atk || 0) + (s.heroAtk || 0);
+
+// 装备武器:替换并销毁当前武器(剩余耐久作废)
+export function equipWeapon(st: GameState, side: Side, cid: number) {
+  const c = byId[cid];
+  if (!c || c.type !== "w") return;
+  st[side].weapon = { cid: c.id, atk: c.atk, dur: c.dur };
+  fx(st, side + "-hero", `🗡️${c.atk}/${c.dur}`, "#e0c080");
+}
+
+// 英雄发起一次攻击后消耗 1 点武器耐久,耐久归 0 则销毁(无武器时——纯变形攻击力——不消耗任何东西)
+function consumeWeaponDur(st: GameState, side: Side) {
+  const w = st[side].weapon;
+  if (!w) return;
+  w.dur -= 1;
+  if (w.dur <= 0) {
+    st[side].weapon = null;
+    fx(st, side + "-hero", "💥武器损毁", "#ff9a5c");
+  }
+}
+
+// 英雄攻击:攻击随从时承受随从攻击力的反击伤害(先扣护甲);攻击英雄无反击。每回合一次,消耗 1 点耐久。
+export function resolveHeroAttack(st: GameState, side: Side, tgt: AttackTarget | null): boolean {
+  if (!tgt) return false;
+  const s = st[side];
+  const e = other(side);
+  const defender = st[e];
+  if (!s || !defender) return false;
+  const atk = heroAtkVal(s);
+  if (atk <= 0 || s.heroAttacked) return false;
+  const taunts = defender.board.filter((m) => m.taunt);
+  if (tgt.hero) {
+    if (taunts.length) return false;
+    s.heroAttacked = true;
+    dmgHero(st, e, atk);
+    consumeWeaponDur(st, side);
+    return true;
+  }
+  const D = defender.board.find((m) => m.uid === tgt.uid);
+  if (!D || (taunts.length && !D.taunt)) return false;
+  s.heroAttacked = true;
+  const dAtk = D.atk;
+  dmgMinion(st, e, D.uid, atk);
+  if (dAtk > 0) dmgHero(st, side, dAtk); // 反击伤害
+  consumeWeaponDur(st, side);
+  return true;
+}
+
+// 从手牌打出武器牌:支付费用、装备。武器走通用"打出"路径(计连击、月光指引/异教地图触发)。
+export function playWeapon(st: GameState, side: Side, i: number): boolean {
+  const s = st[side];
+  if (!s) return false;
+  const en = s.hand[i];
+  if (!en) return false;
+  const c = byId[en.cid];
+  if (!c || c.type !== "w") return false;
+  const cost = effCost(st, side, c, en);
+  if (cost > s.mana) return false;
+  s.mana -= cost;
+  s.hand.splice(i, 1);
+  equipWeapon(st, side, c.id);
+  s.playedThisTurn = (s.playedThisTurn || 0) + 1;
+  moonTutor(st, side, en);
+  mapTutor(st, side, en);
+  return true;
+}
+
+// 英雄技能:每回合限用一次,消耗 HERO_POWER_COST。德鲁伊「变形」/潜行者「暗影匕首」。
+export function useHeroPower(st: GameState, side: Side): boolean {
+  const s = st[side];
+  if (!s || s.heroPowerUsed || s.mana < HERO_POWER_COST) return false;
+  s.mana -= HERO_POWER_COST;
+  s.heroPowerUsed = true;
+  if (s.classId === "rogue") {
+    equipWeapon(st, side, DAGGER.id);
+    log(st, `${side === "p" ? "你" : "对手"}使用「暗影匕首」装备了匕首`);
+  } else {
+    // 德鲁伊变形:+1 护甲,+1 攻击力(仅当回合)
+    s.armor = (s.armor || 0) + 1;
+    s.heroAtk = (s.heroAtk || 0) + 1;
+    fx(st, side + "-hero", "+1🛡 +1⚔", "#bfd3e6");
+    log(st, `${side === "p" ? "你" : "对手"}使用「变形」,获得 1 点护甲和 1 点攻击力`);
+  }
+  return true;
+}
+
 // seed 缺省取系统熵;测试传入固定 seed 即可复现整局。
-export function initGame(playerDeck: number[] | null = null, seed: number = (Date.now() ^ (Math.random() * 0x100000000)) | 0): GameState {
+export function initGame(playerDeck: number[] | null = null, playerClass?: ClassId, seed: number = (Date.now() ^ (Math.random() * 0x100000000)) | 0): GameState {
   const st: GameState = {
     phase: "play", turn: "p", first: "p", turnNum: 0, winner: null, rngState: seed | 0, fx: [], logs: [], notice: null, pending: null,
     lastLog: "", banner: null,
-    p: { hp: 30, armor: 0, mana: 0, maxMana: 0, fatigue: 0, spellDmg: 0, deck: [], hand: [], board: [] },
-    a: { hp: 30, armor: 0, mana: 0, maxMana: 0, fatigue: 0, spellDmg: 0, deck: [], hand: [], board: [] },
+    p: { hp: 30, armor: 0, mana: 0, maxMana: 0, fatigue: 0, spellDmg: 0, weapon: null, heroAtk: 0, deck: [], hand: [], board: [] },
+    a: { hp: 30, armor: 0, mana: 0, maxMana: 0, fatigue: 0, spellDmg: 0, weapon: null, heroAtk: 0, deck: [], hand: [], board: [] },
   };
   const rng = () => rand(st);
   const first: Side = rand(st) < 0.5 ? "p" : "a";
@@ -756,8 +847,13 @@ export function initGame(playerDeck: number[] | null = null, seed: number = (Dat
   st.first = first;
   st.turnNum = first === "p" ? 1 : 0;
   st.banner = { text: first === "p" ? "你是先手!" : "对手先手", id: Date.now() };
-  st.p.deck = playerDeck ? shuffle([...playerDeck], rng) : buildDeck(rng);
-  st.a.deck = buildDeck(rng);
+  // 玩家职业取所选牌组的职业(随机牌组时随机一个);AI 随机一个职业并按职业建库
+  const pClass: ClassId = playerClass || randPick(st, CLASS_IDS);
+  const aClass: ClassId = randPick(st, CLASS_IDS);
+  st.p.classId = pClass;
+  st.a.classId = aClass;
+  st.p.deck = playerDeck ? shuffle([...playerDeck], rng) : buildDeck(rng, pClass);
+  st.a.deck = buildDeck(rng, aClass);
   log(st, first === "p"
     ? "你获得先手!点击手牌查看,再次点击打出。"
     : "对手获得先手,你作为后手多抽一张牌并获得「幸运币」。");

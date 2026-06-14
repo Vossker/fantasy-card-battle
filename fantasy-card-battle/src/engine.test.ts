@@ -5,8 +5,9 @@ import {
   castDeckSpell, castSpell, dmgHero, draw, effCard, effCost, endTurnCleanup,
   gainMoonCopy, initGame, moonTutor, playMinion, rand, resolveAttack, spSummary,
   freezeMinion, thawFrozen, startTurn, dredgePick, mapTake, mapTutor,
+  equipWeapon, playWeapon, resolveHeroAttack, useHeroPower, heroAtkVal,
 } from "./engine";
-import { byId } from "./cards";
+import { byId, DAGGER } from "./cards";
 import { computeAiTurn } from "./ai";
 
 // ---------- 构造最小 state 的辅助 ----------
@@ -211,15 +212,15 @@ describe("RNG:可复现性(步骤 4 注入种子的成果)", () => {
   });
 
   it("initGame 同种子生成完全相同的牌库", () => {
-    const g1 = initGame(null, 42);
-    const g2 = initGame(null, 42);
+    const g1 = initGame(null, "druid", 42);
+    const g2 = initGame(null, "druid", 42);
     expect(g1.p.deck).toEqual(g2.p.deck);
     expect(g1.a.deck).toEqual(g2.a.deck);
     expect(g1.first).toBe(g2.first);
   });
 
   it("computeAiTurn 对同一局面产出完全相同的快照(可复现回放)", () => {
-    const base = initGame(null, 2024);
+    const base = initGame(null, "druid", 2024);
     base.turn = "a"; // 让 AI 接管
     const s1 = computeAiTurn(base);
     const s2 = computeAiTurn(base);
@@ -476,5 +477,73 @@ describe("洛欧塞布(id51)加税", () => {
     // 光环更晚登场(seq 大于加税 order)→ 光环生效,法术固定为 1
     const auraLater = mkState({ p: side({ board: [minion({ seq: 200, cid: 27 })], spellTax: { amt: 5, order: 100 } }) });
     expect(effCost(auraLater, "p", byId[25])).toBe(1);
+  });
+});
+
+describe("武器与英雄攻击", () => {
+  it("装备武器后英雄获得攻击力,攻击英雄消耗 1 耐久、无反击", () => {
+    const st = mkState({ p: side(), a: side({ hp: 30 }) });
+    equipWeapon(st, "p", 52); // 炽炎战斧 3/2
+    expect(heroAtkVal(st.p)).toBe(3);
+    expect(resolveHeroAttack(st, "p", { hero: true })).toBe(true);
+    expect(st.a.hp).toBe(27);
+    expect(st.p.weapon!.dur).toBe(1); // 耐久 -1
+    expect(st.p.heroAttacked).toBe(true);
+    expect(st.p.hp).toBe(30); // 打脸无反击
+  });
+
+  it("英雄每回合只能攻击一次", () => {
+    const st = mkState({ p: side({ weapon: { cid: 52, atk: 3, dur: 2 } }), a: side() });
+    expect(resolveHeroAttack(st, "p", { hero: true })).toBe(true);
+    expect(resolveHeroAttack(st, "p", { hero: true })).toBe(false);
+  });
+
+  it("英雄攻击随从承受反击,耐久归零销毁武器", () => {
+    const st = mkState({ p: side({ weapon: { cid: 96, atk: 1, dur: 1 } }), a: side({ board: [minion({ uid: 9, atk: 2, hp: 3 })] }) });
+    expect(resolveHeroAttack(st, "p", { uid: 9 })).toBe(true);
+    expect(st.a.board[0].hp).toBe(2); // 受到 1 点
+    expect(st.p.hp).toBe(28); // 反击 2 点
+    expect(st.p.weapon).toBe(null); // 耐久 1→0 销毁
+  });
+
+  it("有嘲讽时英雄不能攻击英雄,只能打嘲讽随从", () => {
+    const st = mkState({ p: side({ weapon: { cid: 52, atk: 3, dur: 2 } }), a: side({ board: [minion({ uid: 9, taunt: true, hp: 4 })] }) });
+    expect(resolveHeroAttack(st, "p", { hero: true })).toBe(false);
+    expect(resolveHeroAttack(st, "p", { uid: 9 })).toBe(true);
+  });
+
+  it("playWeapon 从手牌装备武器并扣费", () => {
+    const st = mkState({ p: side({ mana: 5, hand: [{ uid: 1, cid: 52 }] }) });
+    expect(playWeapon(st, "p", 0)).toBe(true);
+    expect(st.p.weapon).toEqual({ cid: 52, atk: 3, dur: 2 });
+    expect(st.p.mana).toBe(2); // 5 - 3
+    expect(st.p.hand.length).toBe(0);
+  });
+});
+
+describe("英雄技能", () => {
+  it("潜行者「暗影匕首」装备 1/2 匕首,消耗 2 法力且每回合一次", () => {
+    const st = mkState({ p: side({ classId: "rogue", mana: 5 }) });
+    expect(useHeroPower(st, "p")).toBe(true);
+    expect(st.p.weapon).toEqual({ cid: DAGGER.id, atk: 1, dur: 2 });
+    expect(st.p.mana).toBe(3);
+    expect(useHeroPower(st, "p")).toBe(false); // 本回合已用
+  });
+
+  it("德鲁伊「变形」获得 1 护甲与 1 临时攻击力,startTurn 清攻击力但护甲保留", () => {
+    const st = mkState({ p: side({ classId: "druid", mana: 5, armor: 0, deck: [1, 2] }) });
+    expect(useHeroPower(st, "p")).toBe(true);
+    expect(st.p.armor).toBe(1);
+    expect(heroAtkVal(st.p)).toBe(1);
+    expect(st.p.mana).toBe(3);
+    startTurn(st, "p"); // 牌库有牌,抽牌不触发疲劳
+    expect(st.p.heroAtk).toBe(0); // 临时攻击力清零
+    expect(st.p.armor).toBe(1); // 护甲保留
+    expect(st.p.heroPowerUsed).toBe(false); // 可再次使用
+  });
+
+  it("法力不足时无法使用英雄技能", () => {
+    const st = mkState({ p: side({ classId: "druid", mana: 1 }) });
+    expect(useHeroPower(st, "p")).toBe(false);
   });
 });

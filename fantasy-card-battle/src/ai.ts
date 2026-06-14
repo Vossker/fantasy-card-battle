@@ -1,11 +1,12 @@
 // ================= AI 对手 =================
 // aiPlay 是一条优先级 if-return 链,每次只做一个动作,返回是否有动作。
 // 抉择类法术 AI 不走弹窗:在分支内手动扣费 + splice 手牌,按启发式直接结算(与玩家的延迟支付路径不同)。
-import { byId, HAND_LIMIT } from "./cards";
+import { byId, HAND_LIMIT, HERO_POWER_COST } from "./cards";
 import {
   afterSpellPlayed, applyOpt, campEffect, campLabel, castDeckSpell, castSpell, clone,
-  dredgePick, effCard, effCost, endTurnCleanup, gainMoonCopy, log, mapTake, moonTutor, playMinion,
-  removeFromDeck, resolveAttack, sampleDeck, sampleDeckAny, startTurn, summonFromDeck, thawFrozen,
+  dredgePick, effCard, effCost, endTurnCleanup, gainMoonCopy, heroAtkVal, log, mapTake, moonTutor,
+  playMinion, playWeapon, removeFromDeck, resolveAttack, resolveHeroAttack, sampleDeck, sampleDeckAny,
+  startTurn, summonFromDeck, thawFrozen, useHeroPower,
 } from "./engine";
 import type { AttackTarget, Card, GameState, HandEntry, MinionCard } from "./types";
 
@@ -163,6 +164,14 @@ export function aiPlay(st: GameState): boolean {
       return true;
     }
   }
+  // 装备武器:无武器或新武器(攻击×耐久)更强时打出
+  const wep = can.find((h) => h.c.type === "w");
+  if (wep && wep.c.type === "w") {
+    const cur = A.weapon;
+    if (!cur || wep.c.atk * wep.c.dur > cur.atk * cur.dur) {
+      if (playWeapon(st, "a", wep.i)) { log(st, `对手装备了「${wep.c.name}」`); return true; }
+    }
+  }
   // 强化
   const bf = can.find((h) => h.c.sp?.k === "buff");
   if (bf && A.board.length) {
@@ -256,6 +265,11 @@ export function aiPlay(st: GameState): boolean {
   if (passage && !A.stash && A.hand.length <= 3 && A.deck.length >= 4) {
     if (castSpell(st, "a", passage.i, null)) { log(st, `对手施放了「${passage.c.name}」`); return true; }
   }
+  // 英雄技能:潜行者无武器时装备匕首;德鲁伊用富余法力换护甲+攻击(留作攻击/铺场之后)
+  if (!A.heroPowerUsed && A.mana >= HERO_POWER_COST) {
+    const worth = A.classId === "rogue" ? !A.weapon : true;
+    if (worth && useHeroPower(st, "a")) return true;
+  }
   // 残局烧脸
   if (dmg.length && P.hp <= 15) {
     if (castSpell(st, "a", dmg[0].i, { side: "p", hero: true })) {
@@ -304,6 +318,22 @@ export function aiAttack(st: GameState): boolean {
   }
   return false;
 }
+// 英雄攻击:无嘲讽时打脸;有嘲讽时,能击杀或英雄能承受反击才攻击最弱嘲讽。每回合一次。
+export function aiHeroAttack(st: GameState): boolean {
+  const A = st.a, P = st.p;
+  const atk = heroAtkVal(A);
+  if (atk <= 0 || A.heroAttacked) return false;
+  const taunts = P.board.filter((m) => m.taunt);
+  if (taunts.length) {
+    const t = [...taunts].sort((a, b) => a.hp - b.hp)[0];
+    if (atk >= t.hp || A.hp + (A.armor || 0) > t.atk) {
+      if (resolveHeroAttack(st, "a", { uid: t.uid })) { log(st, `对手的英雄攻击了「${t.name}」`); return true; }
+    }
+    return false;
+  }
+  if (resolveHeroAttack(st, "a", { hero: true })) { log(st, "对手的英雄攻击了你的英雄"); return true; }
+  return false;
+}
 // 克隆 state → 跑完整个 AI 回合 → 产出快照数组,UI 层以 750ms 间隔依次回放。
 // ⚠️ AI 回合期间不要另行 setGame,会被后续快照覆盖。
 export function computeAiTurn(b: GameState): GameState[] {
@@ -319,6 +349,7 @@ export function computeAiTurn(b: GameState): GameState[] {
   while (g++ < 12 && !st.winner) { st.fx = []; if (!aiPlay(st)) break; push(); }
   g = 0;
   while (g++ < 12 && !st.winner) { st.fx = []; if (!aiAttack(st)) break; push(); }
+  st.fx = []; if (!st.winner && aiHeroAttack(st)) push(); // 英雄武器/变形攻击
   if (st.a.stash) { st.fx = []; endTurnCleanup(st, "a"); push(); } // 秘密通道:回合结束换回手牌
   st.fx = []; if (thawFrozen(st, "a")) push(); // 冻结结算:AI 回合结束时解冻己方随从
   return snaps;

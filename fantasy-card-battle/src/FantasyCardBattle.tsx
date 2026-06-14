@@ -3,16 +3,20 @@ import { useState, useRef, useEffect, type CSSProperties } from "react";
 import {
   POOL, RARITY, byId, maxCopies, HAND_LIMIT, kw, cardDesc, spTarget,
   MAX_DECKS, loadDecks, saveDecks, loadActiveDeckId, saveActiveDeckId, genDeckId, type SavedDeck,
+  CLASS_IDS, CLASS_META, HERO_POWER_COST, cardInClass, isNeutral,
 } from "./cards";
 import {
   clone, log, effCost, effCard, afterSpellPlayed, endTurnCleanup, initGame, startTurn, thawFrozen,
-  playMinion, castSpell, castDeckSpell, resolveAttack, removeFromDeck, summonFromDeck,
+  playMinion, playWeapon, castSpell, castDeckSpell, resolveAttack, resolveHeroAttack, useHeroPower,
+  heroAtkVal, removeFromDeck, summonFromDeck,
   sampleDeck, sampleDeckAny, campEffect, campLabel, applyOpt, moonTutor, gainMoonCopy, spSummary,
   draw, dredgePick, mapTake, mapDrawLeft,
 } from "./engine";
 import { computeAiTurn } from "./ai";
 import { CSS, MinionEl, HeroEl, HandCard, Badge } from "./ui/components";
-import type { BloomMode, CampOpt, GameState, Side } from "./types";
+import type { BloomMode, CampOpt, ClassId, GameState, Side } from "./types";
+
+type DeckTab = ClassId | "neutral";
 
 // 主菜单 / 牌组构建阶段没有对局数据;进入 play/over 后是完整 GameState
 interface LobbyState extends Partial<Omit<GameState, "phase">> {
@@ -24,6 +28,7 @@ export default function ArcaneThrone() {
   const [game, setGame] = useState<UiGame>({ phase: "menu" });
   const [selHand, setSelHand] = useState<number | null>(null);
   const [selAtk, setSelAtk] = useState<number | null>(null);
+  const [selHeroAtk, setSelHeroAtk] = useState(false); // 已选中我方英雄作为攻击者
   const [hint, setHint] = useState<{ t: string; id: number } | null>(null);
   const [hovHand, setHovHand] = useState<number | null>(null);
   const [inspect, setInspect] = useState<{ side: Side; uid: number } | null>(null);
@@ -38,6 +43,9 @@ export default function ArcaneThrone() {
   const [deckName, setDeckName] = useState("");
   const [deckMsg, setDeckMsg] = useState("");
   const [rightMode, setRightMode] = useState<"list" | "preview">("list"); // 右侧面板:牌组列表 / 当前牌组实时预览
+  const [buildClass, setBuildClass] = useState<ClassId | null>(null); // 当前正在构建/编辑的牌组职业(null = 仅浏览)
+  const [deckTab, setDeckTab] = useState<DeckTab>("druid"); // 卡池筛选标签
+  const [choosingClass, setChoosingClass] = useState(false); // 新建牌组:职业选择界面
   const [hovPrevCid, setHovPrevCid] = useState<number | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
@@ -87,14 +95,16 @@ export default function ArcaneThrone() {
     if (game.phase !== "play" || !myTurn) { aimFrom.current = null; setPointer(null); return; }
     const g = game;
     const targeting =
-      selAtk != null ||
+      selAtk != null || selHeroAtk ||
       (selHand != null && !!g.p.hand[selHand] &&
         (() => {
           const c = effCard(g, "p", g.p.hand[selHand]);
           return !!spTarget(c.sp) && effCost(g, "p", c) <= g.p.mana;
         })());
     if (!targeting) { aimFrom.current = null; setPointer(null); return; }
-    const sel = selAtk != null
+    const sel = selHeroAtk
+      ? document.querySelector(`[data-heroel="p"]`)
+      : selAtk != null
       ? document.querySelector(`[data-muid="p-${selAtk}"]`)
       : document.querySelector(`[data-hand="${selHand}"]`);
     aimFrom.current = sel
@@ -103,7 +113,7 @@ export default function ArcaneThrone() {
     const move = (e: PointerEvent) => setPointer({ x: e.clientX, y: e.clientY });
     window.addEventListener("pointermove", move);
     return () => window.removeEventListener("pointermove", move);
-  }, [game, selAtk, selHand, myTurn]);
+  }, [game, selAtk, selHeroAtk, selHand, myTurn]);
   // 状态更新统一走 mutate:深拷贝当前 state → fn 内用引擎函数修改 → setGame
   const mutate = (fn: (st: GameState) => void) =>
     setGame((g) => {
@@ -116,10 +126,11 @@ export default function ArcaneThrone() {
   const start = () => {
     timers.current.forEach(clearTimeout);
     timers.current = [];
-    setSelHand(null); setSelAtk(null); setHint(null);
+    setSelHand(null); setSelAtk(null); setSelHeroAtk(false); setHint(null);
     setHovHand(null); setInspect(null); setShowLog(false);
     setConfirmSurrender(false);
-    const st = initGame(playerDeck);
+    // 对战牌组完整时用其职业;否则随机牌组,职业由引擎随机选取
+    const st = initGame(playerDeck, playerDeck ? activeDeck!.classId : undefined);
     if (st.turn === "a") runAiTurn(st);
     else setGame(st);
   };
@@ -165,23 +176,37 @@ export default function ArcaneThrone() {
       if (!decks.some((d) => d.name === n)) return n;
     }
   };
-  // 进入构建区:从一副空白新牌组开始(右侧仍可选择编辑已有牌组)
-  const startNewDeck = () => {
-    setEditingId(null);
-    setDeckSel([]);
-    setDeckName(defaultDeckName());
-    setRightMode("preview");
+  // 退出构建态,回到"仅浏览全部卡牌"的状态(右侧显示牌组列表)
+  const exitBuild = () => {
+    setBuildClass(null); setEditingId(null); setDeckSel([]); setDeckName("");
+    setChoosingClass(false); setRightMode("list");
   };
   const openDeckBuilder = () => {
-    startNewDeck();
-    setRightMode(decks.length === 0 ? "preview" : "list");
+    exitBuild();
+    setDeckTab("druid");
     setRenamingId(null); setConfirmDel(null); setDeckMsg("");
     setGame({ phase: "deck" });
+  };
+  // 点击"新建牌组":先进入职业选择界面
+  const beginNewDeck = () => {
+    if (decks.length >= MAX_DECKS) { setDeckMsg(`最多只能保存 ${MAX_DECKS} 个牌组`); return; }
+    setChoosingClass(true);
+  };
+  // 选定职业后开始构建空白牌组
+  const chooseClass = (cls: ClassId) => {
+    setBuildClass(cls); setEditingId(null); setDeckSel([]); setDeckName(defaultDeckName());
+    setDeckTab(cls); setChoosingClass(false); setRightMode("preview"); setDeckMsg("");
   };
   const persistDecks = (next: SavedDeck[]) => { setDecks(next); saveDecks(next); };
   const setActive = (id: string) => { setActiveId(id); saveActiveDeckId(id); };
 
-  const addCard = (id: number) => setDeckSel((d) => (d.length >= 30 || d.filter((x) => x === id).length >= maxCopies(byId[id]) ? d : [...d, id]));
+  // 仅在构建态(buildClass 非空)可加牌,且卡牌须属当前职业可用
+  const addCard = (id: number) =>
+    setDeckSel((d) => {
+      if (!buildClass || !cardInClass(byId[id], buildClass)) return d;
+      if (d.length >= 30 || d.filter((x) => x === id).length >= maxCopies(byId[id])) return d;
+      return [...d, id];
+    });
   const removeCard = (id: number) =>
     setDeckSel((d) => {
       const i = d.indexOf(id);
@@ -192,10 +217,12 @@ export default function ArcaneThrone() {
     });
   const randomFill = () =>
     setDeckSel((d) => {
+      if (!buildClass) return d;
+      const pool = POOL.filter((c) => cardInClass(c, buildClass!));
       const nd = [...d];
       let guard = 0;
       while (nd.length < 30 && guard++ < 500) {
-        const c = POOL[Math.floor(Math.random() * POOL.length)];
+        const c = pool[Math.floor(Math.random() * pool.length)];
         if (nd.filter((x) => x === c.id).length >= maxCopies(c)) continue;
         nd.push(c.id);
       }
@@ -203,31 +230,31 @@ export default function ArcaneThrone() {
     });
   // 保存当前构建区:编辑则更新原牌组,新建则追加(受 9 副上限约束);保存后停留在编辑态
   const saveDeck = () => {
-    if (deckSel.length !== 30) return;
+    if (deckSel.length !== 30 || !buildClass) return;
     const cards = [...deckSel];
     const name = deckName.trim() || defaultDeckName();
     if (editingId) {
-      persistDecks(decks.map((d) => (d.id === editingId ? { ...d, name, cards } : d)));
+      persistDecks(decks.map((d) => (d.id === editingId ? { ...d, name, cards, classId: buildClass } : d)));
       setDeckMsg("已更新牌组 ✓");
     } else {
       if (decks.length >= MAX_DECKS) { setDeckMsg(`最多只能保存 ${MAX_DECKS} 个牌组`); return; }
       const id = genDeckId();
-      persistDecks([...decks, { id, name, cards }]);
+      persistDecks([...decks, { id, name, classId: buildClass, cards }]);
       setEditingId(id);
       if (!activeId) setActive(id); // 第一副牌组自动设为对战牌组
       setDeckMsg("已保存牌组 ✓");
     }
   };
-  // 载入已有牌组到构建区
+  // 载入已有牌组到构建区(锁定为其职业)
   const editDeck = (d: SavedDeck) => {
-    setEditingId(d.id); setDeckSel([...d.cards]); setDeckName(d.name);
-    setRightMode("preview"); setRenamingId(null);
+    setBuildClass(d.classId); setEditingId(d.id); setDeckSel([...d.cards]); setDeckName(d.name);
+    setDeckTab(d.classId); setRightMode("preview"); setRenamingId(null);
     setDeckMsg("");
   };
   const deleteDeck = (id: string) => {
     persistDecks(decks.filter((d) => d.id !== id));
     if (activeId === id) { setActiveId(null); saveActiveDeckId(null); }
-    if (editingId === id) startNewDeck();
+    if (editingId === id) exitBuild();
     setConfirmDel(null);
   };
   const startRename = (d: SavedDeck) => { setRenamingId(d.id); setRenameText(d.name); };
@@ -357,7 +384,7 @@ export default function ArcaneThrone() {
     timers.current.forEach(clearTimeout);
     timers.current = [];
     setConfirmSurrender(false);
-    setSelHand(null); setSelAtk(null); setInspect(null); setHovHand(null);
+    setSelHand(null); setSelAtk(null); setSelHeroAtk(false); setInspect(null); setHovHand(null);
     mutate((st) => {
       if (st.winner || st.phase !== "play") return;
       st.winner = "a";
@@ -386,6 +413,9 @@ export default function ArcaneThrone() {
     if (c.type === "m") {
       if (game.p.board.length >= 6) { setHint({ t: "随从区已满(最多 6 个)", id: Date.now() }); return; }
       mutate((st) => { if (playMinion(st, "p", i)) log(st, `你打出了「${c.name}」`); });
+      setSelHand(null); setHovHand(null);
+    } else if (c.type === "w") {
+      mutate((st) => { if (playWeapon(st, "p", i)) log(st, `你装备了「${c.name}」`); });
       setSelHand(null); setHovHand(null);
     } else if (c.sp.k === "bloom") {
       const mOk = game.p.board.length < 6 && game.p.deck.some((cid) => byId[cid].type === "m");
@@ -479,16 +509,26 @@ export default function ArcaneThrone() {
       if (m.sick && !m.rush) { setInspect({ side, uid }); setHint({ t: "刚上场的随从需等待一回合(冲锋除外)", id: Date.now() }); return; }
       if (m.attacked) { setInspect({ side, uid }); setHint({ t: "该随从本回合已攻击过", id: Date.now() }); return; }
       const next = selAtk === uid ? null : uid;
-      setSelAtk(next); setSelHand(null); setInspect(null);
+      setSelAtk(next); setSelHeroAtk(false); setSelHand(null); setInspect(null);
       if (next) setHint({ t: "点击敌方随从或英雄发起攻击", id: Date.now() });
       return;
     }
-    if (side === "a" && !selAtk && uid) {
+    // 选中我方英雄作为攻击者(装备武器或变形后有攻击力,且本回合未攻击)
+    if (side === "p" && !uid) {
+      if (heroAtkVal(game.p) <= 0) { setHint({ t: "英雄没有攻击力(可装备武器或使用英雄技能)", id: Date.now() }); return; }
+      if (game.p.heroAttacked) { setHint({ t: "英雄本回合已攻击过", id: Date.now() }); return; }
+      const next = !selHeroAtk;
+      setSelHeroAtk(next); setSelAtk(null); setSelHand(null); setInspect(null);
+      if (next) setHint({ t: "点击敌方随从或英雄发起攻击", id: Date.now() });
+      return;
+    }
+    if (side === "a" && !selAtk && !selHeroAtk && uid) {
       setInspect({ side, uid }); setSelHand(null);
       return;
     }
-    if (side === "a" && selAtk) {
+    if (side === "a" && (selAtk || selHeroAtk)) {
       const taunts = game.a.board.filter((m) => m.taunt);
+      const heroAtk = selHeroAtk;
       const a = selAtk;
       if (uid) {
         const t = game.a.board.find((x) => x.uid === uid);
@@ -496,29 +536,44 @@ export default function ArcaneThrone() {
         if (taunts.length && !t.taunt) { setHint({ t: "必须先攻击带 🛡️ 嘲讽的随从", id: Date.now() }); return; }
         const tname = t.name;
         mutate((st) => {
-          const A = st.p.board.find((x) => x.uid === a);
-          if (resolveAttack(st, "p", a, { uid })) {
-            log(st, `你的「${A ? A.name : "随从"}」攻击了「${tname}」`);
+          if (heroAtk) {
+            if (resolveHeroAttack(st, "p", { uid })) log(st, `你的英雄攻击了「${tname}」`);
+          } else {
+            const A = st.p.board.find((x) => x.uid === a);
+            if (resolveAttack(st, "p", a!, { uid })) log(st, `你的「${A ? A.name : "随从"}」攻击了「${tname}」`);
           }
         });
       } else {
         if (taunts.length) { setHint({ t: "必须先攻击带 🛡️ 嘲讽的随从", id: Date.now() }); return; }
-        const atkM = game.p.board.find((x) => x.uid === a);
-        if (atkM && atkM.sick && atkM.rush) { setHint({ t: "突袭随从登场当回合只能攻击敌方随从", id: Date.now() }); return; }
+        if (!heroAtk) {
+          const atkM = game.p.board.find((x) => x.uid === a);
+          if (atkM && atkM.sick && atkM.rush) { setHint({ t: "突袭随从登场当回合只能攻击敌方随从", id: Date.now() }); return; }
+        }
         mutate((st) => {
-          const A = st.p.board.find((x) => x.uid === a);
-          if (resolveAttack(st, "p", a, { hero: true })) {
-            log(st, `你的「${A ? A.name : "随从"}」攻击了敌方英雄`);
+          if (heroAtk) {
+            if (resolveHeroAttack(st, "p", { hero: true })) log(st, "你的英雄攻击了敌方英雄");
+          } else {
+            const A = st.p.board.find((x) => x.uid === a);
+            if (resolveAttack(st, "p", a!, { hero: true })) log(st, `你的「${A ? A.name : "随从"}」攻击了敌方英雄`);
           }
         });
       }
-      setSelAtk(null);
+      setSelAtk(null); setSelHeroAtk(false);
     }
+  }
+
+  // 使用英雄技能(每回合一次,消耗 2 法力)
+  function doHeroPower() {
+    if (!myTurn || game.pending) return;
+    if (game.p.heroPowerUsed) { setHint({ t: "本回合已使用过英雄技能", id: Date.now() }); return; }
+    if (game.p.mana < HERO_POWER_COST) { setHint({ t: "法力水晶不足", id: Date.now() }); return; }
+    setSelHand(null); setSelAtk(null); setSelHeroAtk(false); setInspect(null);
+    mutate((st) => { useHeroPower(st, "p"); });
   }
 
   function endTurn() {
     if (!myTurn || game.pending) return;
-    setSelHand(null); setSelAtk(null); setInspect(null); setHovHand(null);
+    setSelHand(null); setSelAtk(null); setSelHeroAtk(false); setInspect(null); setHovHand(null);
     const cur = gameRef.current;
     if (cur.phase !== "play") return;
     const base = clone(cur);
@@ -566,7 +621,7 @@ export default function ArcaneThrone() {
 
         <span style={{ fontSize: 11, color: activeDeck && !playerDeck ? "#e0a85c" : "#9c9272", textAlign: "center", maxWidth: 340, marginTop: 4 }}>
           {playerDeck
-            ? `⚔️ 对战将使用:${activeDeck!.name}(30 张)`
+            ? `⚔️ 对战将使用:${activeDeck!.name}(${CLASS_META[activeDeck!.classId].name} · 30 张)`
             : activeDeck
             ? `⚠️ 牌组「${activeDeck.name}」不足 30 张,对战将使用随机牌组`
             : "⚔️ 对战将使用:随机牌组"}
@@ -624,9 +679,16 @@ export default function ArcaneThrone() {
     const miniBtn: CSSProperties = { padding: "3px 8px", borderRadius: 7, fontSize: 11, fontWeight: 700, cursor: "pointer", border: "1px solid #8a6d3b", background: "rgba(0,0,0,.28)", color: "#cdbf9a", fontFamily: "inherit", lineHeight: 1.4 };
     const nameColor = (c: typeof POOL[number]) => RARITY[c.rarity].color;
     const hovPrevCard = hovPrevCid != null ? byId[hovPrevCid] : null;
+    // 标签栏:构建态(已选职业)只在「本职业 / 中立」之间切换;浏览态可在全部职业 + 中立间切换
+    const tabs: DeckTab[] = buildClass ? [buildClass, "neutral"] : [...CLASS_IDS, "neutral"];
+    const tabLabel = (t: DeckTab) => (t === "neutral" ? "中立" : CLASS_META[t].name);
+    const tabEmoji = (t: DeckTab) => (t === "neutral" ? "⚪" : CLASS_META[t].emoji);
+    const curTab: DeckTab = tabs.includes(deckTab) ? deckTab : tabs[0];
+    // 卡池按当前标签筛选:中立标签取中立牌,职业标签取归属该职业的牌
+    const tabPool = POOL.filter((c) => (curTab === "neutral" ? isNeutral(c) : (c.classes ?? []).includes(curTab)));
     // 卡池分页:每页 20 张
     const PAGE_SIZE = 20;
-    const sortedPool = [...POOL].sort((a, b) => a.cost - b.cost || a.id - b.id);
+    const sortedPool = tabPool.sort((a, b) => a.cost - b.cost || a.id - b.id);
     const pageCount = Math.max(1, Math.ceil(sortedPool.length / PAGE_SIZE));
     const page = Math.min(poolPage, pageCount - 1);
     const pagePool = sortedPool.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
@@ -640,43 +702,71 @@ export default function ArcaneThrone() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <span style={{ fontSize: 18, fontWeight: 900, color: "#ffd700", textShadow: "0 1px 3px #000", whiteSpace: "nowrap" }}>
-                  🛠 {editingId ? "编辑牌组" : "新建牌组"}
+                  {buildClass ? `🛠 ${editingId ? "编辑" : "新建"}牌组` : "📖 浏览全部卡牌"}
                 </span>
-                <input
-                  value={deckName}
-                  maxLength={12}
-                  placeholder="牌组名称"
-                  onChange={(e) => setDeckName(e.target.value)}
-                  style={nameInput}
-                />
-                <span style={{ fontSize: 14, fontWeight: 800, color: full ? "#5ef08a" : "#d8c89a", whiteSpace: "nowrap" }}>{deckSel.length}/30</span>
+                {buildClass && (
+                  <span style={{ fontSize: 12, fontWeight: 800, color: "#e8dcc0", background: "rgba(0,0,0,.35)", border: "1px solid #8a6d3b", borderRadius: 999, padding: "3px 10px", whiteSpace: "nowrap" }}>
+                    {CLASS_META[buildClass].emoji} {CLASS_META[buildClass].name}
+                  </span>
+                )}
+                {buildClass && (
+                  <input
+                    value={deckName}
+                    maxLength={12}
+                    placeholder="牌组名称"
+                    onChange={(e) => setDeckName(e.target.value)}
+                    style={nameInput}
+                  />
+                )}
+                {buildClass && <span style={{ fontSize: 14, fontWeight: 800, color: full ? "#5ef08a" : "#d8c89a", whiteSpace: "nowrap" }}>{deckSel.length}/30</span>}
               </div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button onClick={() => setDeckSel([])} style={subBtn}>清空</button>
-                <button onClick={randomFill} style={subBtn}>随机补满</button>
-                <button
-                  onClick={saveDeck}
-                  disabled={!full}
-                  style={{ ...subBtn, fontWeight: 800, border: "2px solid " + (full ? "#f0d98c" : "#6b6452"), background: full ? "linear-gradient(180deg,#ffe08a,#c79a2e)" : "#4d4738", color: full ? "#4a3508" : "#9a937e", cursor: full ? "pointer" : "default" }}
-                >
-                  {editingId ? "更新牌组" : "保存牌组"}
-                </button>
-              </div>
+              {buildClass ? (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button onClick={() => setDeckSel([])} style={subBtn}>清空</button>
+                  <button onClick={randomFill} style={subBtn}>随机补满</button>
+                  <button
+                    onClick={saveDeck}
+                    disabled={!full}
+                    style={{ ...subBtn, fontWeight: 800, border: "2px solid " + (full ? "#f0d98c" : "#6b6452"), background: full ? "linear-gradient(180deg,#ffe08a,#c79a2e)" : "#4d4738", color: full ? "#4a3508" : "#9a937e", cursor: full ? "pointer" : "default" }}
+                  >
+                    {editingId ? "更新牌组" : "保存牌组"}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+            {/* 标签栏:职业 / 中立 切换 */}
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {tabs.map((t) => {
+                const on = curTab === t;
+                return (
+                  <button
+                    key={t}
+                    onClick={() => { setDeckTab(t); setPoolPage(0); }}
+                    style={{ ...subBtn, padding: "5px 12px", fontWeight: 800, border: "1px solid " + (on ? "#f0d98c" : "#8a6d3b"), background: on ? "rgba(255,215,0,.18)" : "rgba(0,0,0,.3)", color: on ? "#ffe9b0" : "#cdbf9a" }}
+                  >
+                    {tabEmoji(t)} {tabLabel(t)}
+                  </button>
+                );
+              })}
             </div>
             <div style={{ fontSize: 11, color: deckMsg ? "#5ef08a" : "#bfae84", minHeight: 16 }}>
-              {deckMsg || "点击卡牌加入牌组(每种最多 2 张,传说卡每种最多 1 张),点击卡牌右下角 − 移除;选满 30 张后保存。"}
+              {deckMsg || (buildClass
+                ? "点击卡牌加入牌组(每种最多 2 张,传说卡每种最多 1 张),点击右下角 − 移除;选满 30 张后保存。"
+                : "浏览模式:点击标签查看各职业与中立卡牌。点右上「新建牌组」开始组牌。")}
             </div>
             {/* 顶/左留出内边距,避免卡牌角标(费用/数量)被滚动容器裁切 */}
             <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "14px 14px 18px" }}>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(132px,1fr))", gap: 20 }}>
                 {pagePool.map((c) => {
                   const n = counts[c.id] || 0;
-                  const addable = !full && n < maxCopies(c);
+                  const addable = !!buildClass && !full && n < maxCopies(c);
+                  const cardBg = c.type === "m" ? "linear-gradient(170deg,#7a5c33,#4a3517)" : c.type === "w" ? "linear-gradient(170deg,#5e6470,#2e3138)" : "linear-gradient(170deg,#3d4f8a,#23284e)";
+                  const cardBorder = c.type === "m" ? "#caa45c" : c.type === "w" ? "#aab2be" : "#7d90d8";
                   return (
                     <div
                       key={c.id}
                       onClick={() => addCard(c.id)}
-                      style={{ position: "relative", minHeight: 152, boxSizing: "border-box", display: "flex", flexDirection: "column", alignItems: "center", borderRadius: 10, padding: "12px 8px 14px", cursor: addable ? "pointer" : "default", textAlign: "center", background: c.type === "m" ? "linear-gradient(170deg,#7a5c33,#4a3517)" : "linear-gradient(170deg,#3d4f8a,#23284e)", border: n ? "2px solid #ffd700" : "2px solid " + (c.type === "m" ? "#caa45c" : "#7d90d8"), boxShadow: n ? "0 0 10px rgba(255,215,0,.3)" : "0 2px 5px rgba(0,0,0,.4)", opacity: addable || n ? 1 : 0.55 }}
+                      style={{ position: "relative", minHeight: 152, boxSizing: "border-box", display: "flex", flexDirection: "column", alignItems: "center", borderRadius: 10, padding: "12px 8px 14px", cursor: addable ? "pointer" : "default", textAlign: "center", background: cardBg, border: n ? "2px solid #ffd700" : "2px solid " + cardBorder, boxShadow: n ? "0 0 10px rgba(255,215,0,.3)" : "0 2px 5px rgba(0,0,0,.4)", opacity: addable || n ? 1 : buildClass ? 0.55 : 0.9 }}
                     >
                       <span style={{ position: "absolute", top: -9, left: -9, width: 28, height: 28, borderRadius: "50%", background: "radial-gradient(circle at 35% 30%,#9fd6ff,#1f63c4 60%,#0b3a7e)", border: "2px solid #cfe6ff", color: "#fff", fontSize: 15, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center" }}>
                         {c.cost}
@@ -700,6 +790,12 @@ export default function ArcaneThrone() {
                         <>
                           <Badge pos="bl" v={c.atk!} bg="#b8860b" size={34} />
                           <Badge pos="br" v={c.hp!} bg="#7f1d1d" size={34} />
+                        </>
+                      )}
+                      {c.type === "w" && (
+                        <>
+                          <Badge pos="bl" v={c.atk} bg="#b8860b" size={34} />
+                          <Badge pos="br" v={c.dur} bg="#2f6f9e" size={34} />
                         </>
                       )}
                     </div>
@@ -738,7 +834,7 @@ export default function ArcaneThrone() {
                 <div style={{ color: hovPrevCard.rarity === "c" ? "#ffe9b0" : RARITY[hovPrevCard.rarity].color, fontWeight: 800, fontSize: 14, textShadow: "0 1px 2px #000" }}>{hovPrevCard.name}</div>
                 <div style={{ color: RARITY[hovPrevCard.rarity].color, fontSize: 10, fontWeight: 800 }}>◆ {RARITY[hovPrevCard.rarity].label}</div>
                 <div style={{ color: "#9fd6ff", fontSize: 11, fontWeight: 700 }}>
-                  {hovPrevCard.cost} 费{hovPrevCard.type === "m" ? ` · ${hovPrevCard.atk} 攻 / ${hovPrevCard.hp} 血` : ` · ${spSummary(hovPrevCard.sp)}`}
+                  {hovPrevCard.cost} 费{hovPrevCard.type === "m" ? ` · ${hovPrevCard.atk} 攻 / ${hovPrevCard.hp} 血` : hovPrevCard.type === "w" ? ` · ${hovPrevCard.atk} 攻 / ${hovPrevCard.dur} 耐久` : ` · ${spSummary(hovPrevCard.sp)}`}
                 </div>
                 <div style={{ color: "#e8dcc0", fontSize: 11, marginTop: 3, lineHeight: 1.4 }}>{kw(hovPrevCard)}{hovPrevCard.desc}</div>
               </div>
@@ -750,10 +846,10 @@ export default function ArcaneThrone() {
                   <span style={{ fontSize: 12, color: decks.length >= MAX_DECKS ? "#e0a85c" : "#cdbf9a" }}>{decks.length}/{MAX_DECKS}</span>
                 </div>
                 <button
-                  onClick={startNewDeck}
-                  disabled={decks.length >= MAX_DECKS && !editingId}
-                  title={decks.length >= MAX_DECKS ? `最多 ${MAX_DECKS} 个牌组` : "新建一副空白牌组"}
-                  style={{ ...subBtn, width: "100%", fontWeight: 800, opacity: decks.length >= MAX_DECKS && !editingId ? 0.5 : 1, cursor: decks.length >= MAX_DECKS && !editingId ? "default" : "pointer" }}
+                  onClick={beginNewDeck}
+                  disabled={decks.length >= MAX_DECKS}
+                  title={decks.length >= MAX_DECKS ? `最多 ${MAX_DECKS} 个牌组` : "选择职业并新建一副牌组"}
+                  style={{ ...subBtn, width: "100%", fontWeight: 800, opacity: decks.length >= MAX_DECKS ? 0.5 : 1, cursor: decks.length >= MAX_DECKS ? "default" : "pointer" }}
                 >
                   ✚ 新建牌组
                 </button>
@@ -793,6 +889,9 @@ export default function ArcaneThrone() {
                             {d.cards.length}/30
                           </span>
                         </div>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: "#cdbf9a", marginTop: 2 }}>
+                          {CLASS_META[d.classId].emoji} {CLASS_META[d.classId].name}
+                        </div>
                         {!complete && renamingId !== d.id && (
                           <div style={{ fontSize: 10, color: "#e0a85c", marginTop: 2 }}>⚠️ 未完成,无法用于对战</div>
                         )}
@@ -818,12 +917,13 @@ export default function ArcaneThrone() {
             ) : (
               <>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
-                  <button onClick={() => { setRightMode("list"); setHovPrevCid(null); }} style={{ ...miniBtn, whiteSpace: "nowrap" }}>← 牌组列表</button>
+                  <button onClick={() => { exitBuild(); setHovPrevCid(null); }} style={{ ...miniBtn, whiteSpace: "nowrap" }}>← 牌组列表</button>
                   <span style={{ fontSize: 12, fontWeight: 800, color: full ? "#7fd89a" : "#e0a85c", whiteSpace: "nowrap" }}>{deckSel.length}/30</span>
                 </div>
                 <div style={{ fontSize: 14, fontWeight: 900, color: "#ffd700", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   👁 {deckName.trim() || (editingId ? "" : "新建牌组")}
                 </div>
+                {buildClass && <div style={{ fontSize: 11, fontWeight: 700, color: "#cdbf9a" }}>{CLASS_META[buildClass].emoji} {CLASS_META[buildClass].name}</div>}
                 <div style={{ fontSize: 11, color: "#bfae84" }}>悬停查看详情 · 点击移除一张</div>
                 <div
                   onMouseLeave={() => setHovPrevCid(null)}
@@ -867,6 +967,33 @@ export default function ArcaneThrone() {
             )}
           </div>
         </div>
+
+        {/* ---------- 新建牌组:选择职业 ---------- */}
+        {choosingClass && (
+          <div onClick={() => setChoosingClass(false)} style={{ position: "absolute", inset: 0, background: "rgba(8,6,2,.78)", zIndex: 72, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 18, padding: 20 }}>
+            <div style={{ fontSize: 20, fontWeight: 900, color: "#ffd700", textShadow: "0 0 14px rgba(255,200,0,.6)", letterSpacing: 2 }}>选择职业</div>
+            <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 16, flexWrap: "wrap", justifyContent: "center" }}>
+              {CLASS_IDS.map((cls) => {
+                const m = CLASS_META[cls];
+                return (
+                  <div
+                    key={cls}
+                    onClick={() => chooseClass(cls)}
+                    style={{ width: 190, borderRadius: 14, padding: "20px 16px", cursor: "pointer", textAlign: "center", background: "linear-gradient(170deg,#3a3050,#221a30)", border: "2px solid #8a6d3b", boxShadow: "0 6px 20px rgba(0,0,0,.6)" }}
+                  >
+                    <div style={{ fontSize: 44 }}>{m.emoji}</div>
+                    <div style={{ color: "#ffe9b0", fontWeight: 900, fontSize: 18, margin: "6px 0" }}>{m.name}</div>
+                    <div style={{ color: "#9fd6ff", fontSize: 12, fontWeight: 700 }}>英雄技能 · {m.power.name}</div>
+                    <div style={{ color: "#d8cdb2", fontSize: 11, marginTop: 4, lineHeight: 1.5 }}>{m.power.desc}</div>
+                  </div>
+                );
+              })}
+            </div>
+            <button onClick={() => setChoosingClass(false)} style={{ padding: "8px 22px", borderRadius: 999, fontWeight: 700, fontSize: 13, cursor: "pointer", border: "1px solid #8a6d3b", background: "rgba(0,0,0,.45)", color: "#cdbf9a", fontFamily: "inherit" }}>
+              ↩ 取消
+            </button>
+          </div>
+        )}
 
         {/* ---------- 删除确认 ---------- */}
         {confirmDel && (
@@ -918,20 +1045,23 @@ export default function ArcaneThrone() {
       if (selTargetKind === "any") return true;
       return side === "p" && !!uid;
     }
-    if (selAtk) {
+    if (selAtk || selHeroAtk) {
       if (side !== "a") return false;
       if (enemyTaunts.length) return !!uid && !!game.a.board.find((m) => m.uid === uid && m.taunt);
-      if (!uid && selAtkM && selAtkM.sick && selAtkM.rush) return false; // 突袭随从本回合不能打英雄
+      if (!uid && selAtk && selAtkM && selAtkM.sick && selAtkM.rush) return false; // 突袭随从本回合不能打英雄(英雄攻击不受此限)
       return true;
     }
     return false;
   };
   const pending = game.pending;
-  // 是否还有可行动项(可打出的牌或可攻击的随从):用于"结束回合"按钮的状态提示
+  const heroCanAtk = myTurn && heroAtkVal(game.p) > 0 && !game.p.heroAttacked; // 英雄本回合可攻击
+  const canUseHeroPower = myTurn && !game.p.heroPowerUsed && game.p.mana >= HERO_POWER_COST;
+  // 是否还有可行动项(可打出的牌、可攻击的随从、英雄可攻击、可用英雄技能):用于"结束回合"按钮的状态提示
   const canAct =
     myTurn &&
     (game.p.hand.some((en) => effCost(game, "p", effCard(game, "p", en), en) <= game.p.mana) ||
-      game.p.board.some((m) => !m.attacked && !m.frozen && (!m.sick || m.rush)));
+      game.p.board.some((m) => !m.attacked && !m.frozen && (!m.sick || m.rush)) ||
+      heroCanAtk || canUseHeroPower);
 
   // ---------- 对战界面 ----------
   return (
@@ -940,8 +1070,11 @@ export default function ArcaneThrone() {
 
       {/* 顶栏:敌方 */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 14px", background: "linear-gradient(180deg,#523c20,#3a2a14)", borderBottom: "2px solid #8a6d3b", gap: 8 }}>
-        <HeroEl side="a" h={game.a} isT={isT} clickEntity={clickEntity} floats={floats} />
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+        <div style={{ flex: 1 }} />
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+          <HeroEl side="a" h={game.a} isT={isT} clickEntity={clickEntity} floats={floats} heroPowerCost={HERO_POWER_COST} />
+        </div>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
           <div style={{ display: "flex" }}>
             {Array.from({ length: Math.min(game.a.hand.length, HAND_LIMIT) }).map((_, i) => (
               <div key={i} style={{ width: 24, height: 34, marginLeft: i ? -9 : 0, borderRadius: 4, background: "linear-gradient(160deg,#5b3fa0,#2c1d52)", border: "1px solid #9d86d9" }} />
@@ -960,7 +1093,7 @@ export default function ArcaneThrone() {
       </div>
 
       {/* 战场 */}
-      <div onClick={() => { setSelHand(null); setSelAtk(null); setInspect(null); setHovHand(null); setShowLog(false); }} style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-evenly", padding: "6px 4px", minHeight: 290 }}>
+      <div onClick={() => { setSelHand(null); setSelAtk(null); setSelHeroAtk(false); setInspect(null); setHovHand(null); setShowLog(false); }} style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-evenly", padding: "6px 4px", minHeight: 290 }}>
         <div style={{ display: "flex", justifyContent: "center", gap: 16, minHeight: 112, alignItems: "center", overflowX: "auto", padding: "12px 4px" }}>
           {game.a.board.length ? game.a.board.map((m) => <MinionEl key={m.uid} side="a" m={m} myTurn={myTurn} selAtk={selAtk} isT={isT} clickEntity={clickEntity} floats={floats} />) : <span style={{ color: "rgba(230,220,180,.25)", fontSize: 14, letterSpacing: 3 }}>— 敌 方 空 场 —</span>}
         </div>
@@ -1019,13 +1152,13 @@ export default function ArcaneThrone() {
 
       {/* 卡牌 / 随从详情预览(选中、悬停或点击查看) */}
       {previewCard && (
-        // 选目标时(攻击 / 指向性法术)靠左下角显示并半透明,避免遮挡居中的随从区
-        <div style={{ position: "absolute", bottom: 138, left: 8, zIndex: 70, pointerEvents: "none", width: 156, borderRadius: 12, padding: "10px 8px", background: previewCard.type === "m" ? "linear-gradient(170deg,#7a5c33,#3c2b12)" : "linear-gradient(170deg,#3d4f8a,#1d2244)", border: "2px solid #ffd700", boxShadow: "0 8px 24px rgba(0,0,0,.7)", textAlign: "center", opacity: selAtk != null || spellTargeting ? 0.55 : 1, transition: "opacity .15s" }}>
+        // 悬停手牌:在右侧中部显示详情;选目标时(攻击 / 指向性法术)改靠左下角并半透明,避免遮挡居中的随从区
+        <div style={{ position: "absolute", ...(hovCard ? { right: 200, top: "40%" } : { bottom: 138, left: 8 }), zIndex: 70, pointerEvents: "none", width: 156, borderRadius: 12, padding: "10px 8px", background: previewCard.type === "m" ? "linear-gradient(170deg,#7a5c33,#3c2b12)" : "linear-gradient(170deg,#3d4f8a,#1d2244)", border: "2px solid #ffd700", boxShadow: "0 8px 24px rgba(0,0,0,.7)", textAlign: "center", opacity: !hovCard && (selAtk != null || selHeroAtk || spellTargeting) ? 0.55 : 1, transition: "opacity .15s" }}>
           <div style={{ fontSize: 34 }}>{previewCard.emoji}</div>
           <div style={{ color: previewCard.rarity === "c" ? "#ffe9b0" : RARITY[previewCard.rarity].color, fontWeight: 800, fontSize: 14, textShadow: "0 1px 2px #000" }}>{previewCard.name}</div>
           <div style={{ color: RARITY[previewCard.rarity].color, fontSize: 11, fontWeight: 800 }}>◆ {RARITY[previewCard.rarity].label}</div>
           <div style={{ color: "#9fd6ff", fontSize: 12, fontWeight: 700 }}>
-            {effCost(game, "p", previewCard)} 费{previewCard.type === "m" ? ` · ${previewCard.atk} 攻 / ${previewCard.hp} 血` : ` · ${spSummary(previewCard.sp, game.p.spellDmg || 0)}`}
+            {effCost(game, "p", previewCard)} 费{previewCard.type === "m" ? ` · ${previewCard.atk} 攻 / ${previewCard.hp} 血` : previewCard.type === "w" ? ` · ${previewCard.atk} 攻 / ${previewCard.dur} 耐久` : ` · ${spSummary(previewCard.sp, game.p.spellDmg || 0)}`}
           </div>
           <div style={{ color: "#e8dcc0", fontSize: 12, marginTop: 3, lineHeight: 1.45 }}>
             {kw(previewCard)}{cardDesc(previewCard, game.p.spellDmg || 0)}
@@ -1040,7 +1173,7 @@ export default function ArcaneThrone() {
         </div>
       )}
       {inspectM && inspect && (
-        <div style={{ position: "absolute", bottom: 138, left: 8, zIndex: 70, pointerEvents: "none", width: 156, borderRadius: 12, padding: "10px 8px", background: inspect.side === "p" ? "linear-gradient(170deg,#7a5c33,#3c2b12)" : "linear-gradient(170deg,#4a3354,#241a2c)", border: "2px solid " + (inspect.side === "p" ? "#c9a85a" : "#a06bc4"), boxShadow: "0 8px 24px rgba(0,0,0,.7)", textAlign: "center", opacity: selAtk != null || spellTargeting ? 0.55 : 1, transition: "opacity .15s" }}>
+        <div style={{ position: "absolute", bottom: 138, left: 8, zIndex: 70, pointerEvents: "none", width: 156, borderRadius: 12, padding: "10px 8px", background: inspect.side === "p" ? "linear-gradient(170deg,#7a5c33,#3c2b12)" : "linear-gradient(170deg,#4a3354,#241a2c)", border: "2px solid " + (inspect.side === "p" ? "#c9a85a" : "#a06bc4"), boxShadow: "0 8px 24px rgba(0,0,0,.7)", textAlign: "center", opacity: selAtk != null || selHeroAtk || spellTargeting ? 0.55 : 1, transition: "opacity .15s" }}>
           <div style={{ fontSize: 34 }}>{inspectM.emoji}</div>
           <div style={{ color: byId[inspectM.cid] && byId[inspectM.cid].rarity !== "c" ? RARITY[byId[inspectM.cid].rarity].color : "#ffe9b0", fontWeight: 800, fontSize: 14, textShadow: "0 1px 2px #000" }}>{inspectM.name}</div>
           {byId[inspectM.cid] && (
@@ -1060,8 +1193,8 @@ export default function ArcaneThrone() {
       )}
 
       {/* 瞄准箭头:从选中的攻击者 / 法术源指向光标(按意图着色:攻击红、治疗绿、增益金) */}
-      {pointer && aimFrom.current && (selAtk != null || spellTargeting) && (() => {
-        const color = selAtk != null ? "#f85050"
+      {pointer && aimFrom.current && (selAtk != null || selHeroAtk || spellTargeting) && (() => {
+        const color = selAtk != null || selHeroAtk ? "#f85050"
           : selCard && selCard.sp ? (selCard.sp.k === "heal" ? "#5ef08a" : selCard.sp.k === "buff" ? "#ffd700" : "#f85050")
           : "#f85050";
         return (
@@ -1088,8 +1221,11 @@ export default function ArcaneThrone() {
 
       {/* 底栏:我方 */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 14px", background: "linear-gradient(0deg,#523c20,#3a2a14)", borderTop: "2px solid #8a6d3b", gap: 8 }}>
-        <HeroEl side="p" h={game.p} isT={isT} clickEntity={clickEntity} floats={floats} />
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+        <div style={{ flex: 1 }} />
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+          <HeroEl side="p" h={game.p} isT={isT} clickEntity={clickEntity} floats={floats} canAtk={heroCanAtk} sel={selHeroAtk} onHeroPower={doHeroPower} canUseHeroPower={canUseHeroPower} heroPowerCost={HERO_POWER_COST} />
+        </div>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ color: "#7cc4ff", fontWeight: 800, fontSize: 16 }}>{game.p.mana}/{game.p.maxMana}</span>
             <div style={{ display: "flex", gap: 2 }}>
@@ -1104,7 +1240,7 @@ export default function ArcaneThrone() {
 
       {/* 战斗记录面板 */}
       {showLog && (
-        <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", left: "50%", transform: "translateX(-50%)", bottom: 150, width: "min(360px,92vw)", maxHeight: "42vh", display: "flex", flexDirection: "column", zIndex: 85, background: "rgba(20,15,7,.95)", border: "2px solid #8a6d3b", borderRadius: 12, padding: "8px 12px 10px", boxShadow: "0 8px 24px rgba(0,0,0,.7)" }}>
+        <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", left: 8, bottom: 150, width: "min(320px,80vw)", maxHeight: "42vh", display: "flex", flexDirection: "column", zIndex: 85, background: "rgba(20,15,7,.95)", border: "2px solid #8a6d3b", borderRadius: 12, padding: "8px 12px 10px", boxShadow: "0 8px 24px rgba(0,0,0,.7)" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, flexShrink: 0 }}>
             <span style={{ color: "#ffd700", fontSize: 12, fontWeight: 800 }}>📜 战斗记录</span>
             <button onClick={() => setShowLog(false)} style={{ background: "none", border: "none", color: "#cdbf9a", fontSize: 14, cursor: "pointer", padding: "0 2px", fontFamily: "inherit" }}>✕</button>
@@ -1191,7 +1327,7 @@ export default function ArcaneThrone() {
                     </span>
                     <div style={{ fontSize: 32 }}>{c.emoji}</div>
                     <div style={{ color: "#ffe9b0", fontWeight: 800, fontSize: 14 }}>{c.name}</div>
-                    <div style={{ color: "#9fd6ff", fontSize: 11, fontWeight: 700 }}>{c.type === "m" ? `${c.atk} 攻 / ${c.hp} 血` : spSummary(c.sp, game.p.spellDmg || 0)}</div>
+                    <div style={{ color: "#9fd6ff", fontSize: 11, fontWeight: 700 }}>{c.type === "m" ? `${c.atk} 攻 / ${c.hp} 血` : c.type === "w" ? `${c.atk} 攻 / ${c.dur} 耐久` : spSummary(c.sp, game.p.spellDmg || 0)}</div>
                     <div style={{ color: "#d8cdb2", fontSize: 10, marginTop: 3, lineHeight: 1.4 }}>{kw(c)}{cardDesc(c, game.p.spellDmg || 0)}</div>
                   </div>
                 );
@@ -1236,6 +1372,7 @@ export default function ArcaneThrone() {
         </div>
       )}
 
+
       {/* 认输确认 */}
       {confirmSurrender && game.phase === "play" && !game.winner && (
         <div onClick={() => setConfirmSurrender(false)} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 88, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
@@ -1272,7 +1409,7 @@ export default function ArcaneThrone() {
             {game.winner === "p" ? "胜 利" : "战 败"}
           </span>
           <span style={{ color: "#cbbd96", fontSize: 13, textAlign: "center" }}>
-            {game.winner === "p" ? "死灵领主被击败了!王国恢复了和平。" : game.surrendered ? "你选择了认输……重整旗鼓,下次再战!" : "圣辉骑士倒下了……下次再战!"}
+            {game.winner === "p" ? "获胜！你的对手被击败了!" : game.surrendered ? "你选择了认输……重整旗鼓,下次再战!" : "你倒下了……下次再战!"}
             <br />(共进行 {game.turnNum} 个回合)
           </span>
           <button onClick={start} style={goldBtn}>再 来 一 局</button>
