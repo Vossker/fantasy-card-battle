@@ -1,8 +1,8 @@
 // ================= 规则引擎(纯函数,不碰 React) =================
 // 所有函数签名形如 fn(st, side, ...):直接修改传入的 state 对象 st,side 为 "p"(玩家)或 "a"(AI)
-import { COIN, HAND_LIMIT, buildDeck, byId, shuffle, spTarget } from "./cards";
+import { COIN, DANCER, HAND_LIMIT, buildDeck, byId, shuffle, spTarget } from "./cards";
 import type {
-  AttackTarget, BloomMode, CampOpt, ChooseOpt, GameState, HandEntry,
+  AttackTarget, BloomMode, Card, CampOpt, ChooseOpt, GameState, HandEntry,
   MinionCard, Side, SpellDef, SpellTarget,
 } from "./types";
 
@@ -79,6 +79,7 @@ export function startTurn(st: GameState, side: Side) {
   const s = st[side];
   st.p.spellDmg = 0;
   st.a.spellDmg = 0;
+  s.spellDiscount = 0; // 伺机待发:仅本回合,本方回合开始时清零
   s.maxMana = Math.min(10, s.maxMana + 1);
   s.mana = s.maxMana;
   s.board.forEach((m) => { m.sick = false; m.attacked = false; });
@@ -90,13 +91,15 @@ export function playMinion(st: GameState, side: Side, i: number): boolean {
   const en = s.hand[i];
   if (!en) return false;
   const c = byId[en.cid];
-  if (!c || c.type !== "m" || c.cost > s.mana || s.board.length >= 6) return false;
-  s.mana -= c.cost;
+  if (!c || c.type !== "m" || s.board.length >= 6) return false;
+  const cost = effCost(st, side, c); // 奥术巨人等按折后费用校验与扣费
+  if (cost > s.mana) return false;
+  s.mana -= cost;
   s.hand.splice(i, 1);
   s.board.push({
     uid: en.uid, cid: c.id, name: c.name, emoji: c.emoji,
     atk: c.atk, hp: c.hp, maxHp: c.hp,
-    taunt: !!c.taunt, charge: !!c.charge, sick: !c.charge, attacked: false,
+    taunt: !!c.taunt, charge: !!c.charge, rush: !!c.rush, sick: !c.charge, attacked: false,
   });
   if (c.bc) doBattlecry(st, side, c);
   moonTutor(st, side, en);
@@ -112,7 +115,7 @@ function doBattlecry(st: GameState, side: Side, c: MinionCard) {
     s.board.push({
       uid: UID++, cid: mc.id, name: mc.name, emoji: mc.emoji,
       atk: 1, hp: 1, maxHp: 1,
-      taunt: !!mc.taunt, charge: !!mc.charge, sick: !mc.charge, attacked: false,
+      taunt: !!mc.taunt, charge: !!mc.charge, rush: !!mc.rush, sick: !mc.charge, attacked: false,
     });
     log(st, `「${c.name}」从牌库召唤了「${mc.name}」的 1/1 复制`);
   }
@@ -147,9 +150,87 @@ export function sampleDeckAny(st: GameState, side: Side): number[] {
   return cids.slice(0, 3);
 }
 
-// 光环减费:伊谢尔在场时法术费用变 1
-export const effCost = (st: GameState, side: Side, c: { type: "m" | "s"; cost: number }) =>
-  c.type === "s" && st[side].board.some((m) => byId[m.cid]?.aura === "cheapSpells") ? Math.min(1, c.cost) : c.cost;
+// 费用计算(显示与结算的单一来源):
+//   法术 — 伊谢尔光环(变 1 费)优先级高于伺机待发减费:光环在场时直接取 min(1, 原费),不再叠加减费;
+//          无光环时按伺机待发减费,下限 0;
+//   随从 — costScale 随从(奥术巨人)按本方已打出法术数减费,下限 0。
+export const effCost = (st: GameState, side: Side, c: { type: "m" | "s"; cost: number; costScale?: "spellsPlayed" }): number => {
+  if (c.type === "s") {
+    if (st[side].board.some((m) => byId[m.cid]?.aura === "cheapSpells")) return Math.min(1, c.cost); // 光环优先,不叠加减费
+    return Math.max(0, c.cost - (st[side].spellDiscount || 0));
+  }
+  if (c.costScale === "spellsPlayed") return Math.max(0, c.cost - (st[side].spellsPlayed || 0));
+  return c.cost;
+};
+
+// 殒命暗影:在手牌中即显示/结算为本方上一张打出的法术。无可复制法术时返回原牌(此时不可打出)。
+// 任何"读取手牌卡牌"的展示/出牌路径都应经此解析,以同时支持普通牌与变身牌。
+export function effCard(st: GameState, side: Side, en: HandEntry): Card {
+  const c = byId[en.cid];
+  if (c.sp?.k === "shadow") {
+    const last = st[side].lastSpell;
+    if (last != null && byId[last]) return byId[last];
+  }
+  return c;
+}
+
+// 一张法术"从手牌打出"后统一登记:累计计数(奥术巨人)、记录上一张法术(殒命暗影)、
+// 消耗伺机待发减费(伺机待发自身除外,其效果会重新累加减费)。cid 须为实际生效的法术(变身后取被复制者)。
+// 注意:夜影花蕾等从牌库自动施放(castDeckSpell)不经此函数,故不计入。
+export function afterSpellPlayed(st: GameState, side: Side, cid: number) {
+  const s = st[side];
+  s.spellsPlayed = (s.spellsPlayed || 0) + 1;
+  s.lastSpell = cid;
+  if (byId[cid]?.sp?.k !== "ready") s.spellDiscount = 0;
+}
+
+// 街舞起跳:将指定友方随从移回手牌(恢复原始卡),并召唤一个继承其当前攻/血的舞者
+function doBounce(st: GameState, side: Side, uid: number) {
+  const s = st[side];
+  const idx = s.board.findIndex((m) => m.uid === uid);
+  if (idx < 0) return;
+  const m = s.board[idx];
+  const atk = m.atk, hp = m.hp, cid = m.cid;
+  const who = side === "p" ? "你" : "对手";
+  s.board.splice(idx, 1);
+  if (s.hand.length < HAND_LIMIT) s.hand.push({ uid: UID++, cid });
+  else log(st, `${who}的手牌已满,「${byId[cid].name}」无法回到手牌`, true);
+  if (s.board.length < 6) {
+    s.board.push({
+      uid: UID++, cid: DANCER.id, name: DANCER.name, emoji: DANCER.emoji,
+      atk, hp, maxHp: hp, taunt: false, charge: false, rush: true, sick: true, attacked: false,
+    });
+  }
+  log(st, `「街舞起跳」:${byId[cid].name}回到${who === "你" ? "你的" : "对手的"}手牌,召唤了 ${atk}/${hp} 的舞者`);
+}
+
+// 秘密通道:把当前手牌暂存,换成牌库随机至多 4 张(本牌须已离手再调用)。
+// 借来的牌打 borrowed 标记,以便回合结束只洗回它们,而不波及本回合抽到的其他牌。
+function swapHandFromDeck(st: GameState, side: Side) {
+  const s = st[side];
+  s.stash = s.hand;
+  s.hand = [];
+  const n = Math.min(4, s.deck.length);
+  for (let k = 0; k < n; k++) s.hand.push({ uid: UID++, cid: s.deck.pop()!, borrowed: 1 });
+  fx(st, side + "-hero", "🚪", "#c478f0");
+}
+
+// 回合结束清理:伺机待发减费此处不动(在 startTurn 清);秘密通道在此结算换回:
+// 仅把"未打出的借牌(borrowed)"洗回牌库,本回合抽到的牌保留并与取回的原手牌合并(超出手牌上限则烧掉)。
+export function endTurnCleanup(st: GameState, side: Side) {
+  const s = st[side];
+  if (!s.stash) return;
+  const kept: HandEntry[] = [];
+  s.hand.forEach((e) => (e.borrowed ? s.deck.push(e.cid) : kept.push(e)));
+  shuffle(s.deck, () => rand(st));
+  s.hand = [...s.stash, ...kept];
+  s.stash = undefined;
+  const who = side === "p" ? "你" : "对手";
+  while (s.hand.length > HAND_LIMIT) {
+    const burned = s.hand.pop()!;
+    log(st, `${who}的手牌已满,「${byId[burned.cid].name}」被烧掉了`, true);
+  }
+}
 export function removeFromDeck(st: GameState, side: Side, cid: number) {
   const i = st[side].deck.indexOf(cid);
   if (i >= 0) st[side].deck.splice(i, 1);
@@ -170,7 +251,7 @@ export function summonFromDeck(st: GameState, side: Side, cid: number): boolean 
   st[side].board.push({
     uid: UID++, cid: c.id, name: c.name, emoji: c.emoji,
     atk: c.atk, hp: c.hp, maxHp: c.hp,
-    taunt: !!c.taunt, charge: !!c.charge, sick: !c.charge, attacked: false,
+    taunt: !!c.taunt, charge: !!c.charge, rush: !!c.rush, sick: !c.charge, attacked: false,
   });
   return true;
 }
@@ -350,7 +431,73 @@ const EFFECTS: EffectRegistry = {
       }
     },
   },
+  ready: {
+    summary: () => "省 2 费",
+    cast: (st, side) => { st[side].spellDiscount = (st[side].spellDiscount || 0) + 2; fx(st, side + "-hero", "下张-2费", "#7cc4ff"); },
+    autoCast: (st, side) => { st[side].spellDiscount = (st[side].spellDiscount || 0) + 2; fx(st, side + "-hero", "下张-2费", "#7cc4ff"); },
+  },
+  passage: {
+    summary: () => "换 4 张",
+    cast: (st, side) => { swapHandFromDeck(st, side); log(st, `${side === "p" ? "你" : "对手"}的手牌被替换为牌库中随机 ${st[side].hand.length} 张牌,回合结束时换回`); },
+    autoCast: (st, side) => { swapHandFromDeck(st, side); log(st, `${side === "p" ? "你" : "对手"}的手牌被替换为牌库中随机 ${st[side].hand.length} 张牌,回合结束时换回`); },
+  },
+  shuffleDraw: {
+    summary: (sp) => `洗 ${sp.back} 抽 ${sp.draw}`,
+    cast: (st, side, sp) => {
+      const s = st[side];
+      const back = s.hand.splice(0, sp.back).map((e) => e.cid);
+      back.forEach((cid) => s.deck.push(cid));
+      shuffle(s.deck, () => rand(st));
+      draw(st, side, sp.draw);
+    },
+    autoCast: (st, side, sp) => {
+      const s = st[side];
+      const back = s.hand.splice(0, sp.back).map((e) => e.cid);
+      back.forEach((cid) => s.deck.push(cid));
+      shuffle(s.deck, () => rand(st));
+      draw(st, side, sp.draw);
+    },
+  },
+  bounce: {
+    summary: () => "复制随从",
+    cast: (st, side, _sp, tgt) => { if (tgt?.uid != null) doBounce(st, side, tgt.uid); },
+    autoCast: (st, side) => {
+      const board = st[side].board;
+      if (!board.length) return;
+      const m = [...board].sort((a, b) => b.atk + b.hp - (a.atk + a.hp))[0];
+      doBounce(st, side, m.uid);
+    },
+  },
+  shadow: {
+    summary: () => "复制法术",
+    // 从手牌打出时由 castSpell 先解析成"上一张法术"再分发,不会走到此处的 cast;
+    // 仅当被夜影花蕾从牌库翻出时,以牌库施放方式结算上一张法术。
+    autoCast: (st, side, _sp, _bonus, name) => {
+      const last = st[side].lastSpell;
+      if (last == null) return;
+      log(st, `「${name}」复制并施放了「${byId[last].name}」`);
+      castDeckSpell(st, side, last);
+    },
+  },
+  spelldraw: {
+    summary: () => "抽法术",
+    cast: (st, side) => drawSpell(st, side),
+    autoCast: (st, side) => drawSpell(st, side),
+  },
 };
+
+// 暗影之门:从牌库随机抽一张法术牌到手(牌库无法术则不触发、无疲劳)
+function drawSpell(st: GameState, side: Side) {
+  const s = st[side];
+  const who = side === "p" ? "你" : "对手";
+  const spells = s.deck.filter((cid) => byId[cid].type === "s");
+  if (!spells.length) { log(st, `${who}的牌库中没有法术牌`); return; }
+  const pick = randPick(st, spells);
+  removeFromDeck(st, side, pick);
+  if (s.hand.length >= HAND_LIMIT) { log(st, `${who}的手牌已满,「${byId[pick].name}」被烧掉了`, true); return; }
+  s.hand.push({ uid: UID++, cid: pick });
+  log(st, `${who}从牌库抽到了法术牌「${byId[pick].name}」`);
+}
 
 // 按 k 动态取处理器:TS 无法表达"索引出的 handler 与传入的 sp 同 k",在此做一次本地断言收口。
 type AnyEffect = {
@@ -410,16 +557,18 @@ export function castSpell(st: GameState, side: Side, i: number, tgt: SpellTarget
   if (!s) return false;
   const en = s.hand[i];
   if (!en) return false;
-  const c = byId[en.cid];
-  if (!c || c.type !== "s") return false;
+  // 殒命暗影:打出时解析为上一张法术;无可复制法术(仍为 shadow)时不可打出
+  const c = effCard(st, side, en);
+  if (!c || c.type !== "s" || c.sp.k === "shadow") return false;
   const sp = c.sp; // c 已收窄为 SpellCard,sp 为 SpellDef(非 undefined)
   const handler = effectFor(sp.k);
   if (!handler.cast) return false; // 交互类法术(choose/camp/bloom/moonlight)不从此路径打出,由 UI 的 pending 接管
-  const cost = effCost(st, side, c);
+  const cost = effCost(st, side, c); // 费用按实际生效的法术(殒命暗影沿用被复制者的费用)
   if (cost > s.mana || !isValidSpellTarget(st, side, sp, tgt)) return false;
   s.mana -= cost;
   s.hand.splice(i, 1);
   handler.cast(st, side, sp, tgt, s.spellDmg || 0);
+  afterSpellPlayed(st, side, c.id);
   moonTutor(st, side, en);
   return true;
 }
@@ -430,7 +579,9 @@ export function resolveAttack(st: GameState, side: Side, auid: number, tgt: Atta
   const defender = st[e];
   if (!attacker || !defender) return false;
   const A = attacker.board.find((m) => m.uid === auid);
-  if (!A || A.sick || A.attacked || A.atk <= 0) return false;
+  if (!A || A.attacked || A.atk <= 0) return false;
+  // 召唤失调:不能攻击。突袭随从是例外——在 sick 期间可攻击敌方随从,但仍不能攻击英雄
+  if (A.sick && !(A.rush && !tgt.hero)) return false;
   const taunts = defender.board.filter((m) => m.taunt);
   if (tgt.hero) {
     if (taunts.length) return false;

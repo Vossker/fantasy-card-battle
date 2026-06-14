@@ -39,10 +39,20 @@ export const POOL: Card[] = [
   { id: 35, name: "月光指引", emoji: "🌙", cost: 2, type: "s", rarity: "r", sp: { k: "moonlight" }, desc: "【发现】你牌库中的一张牌,获得其复制;如果你在本回合打出该复制,则从牌库抽取本体。" },
   { id: 36, name: "魔法方碑", emoji: "🧿", cost: 1, type: "s", rarity: "r", sp: { k: "obelisk" }, desc: "本回合内,你的所有法术造成的伤害加 1。" },
   { id: 37, name: "巴内斯", emoji: "🎭", cost: 5, type: "m", rarity: "l", atk: 3, hp: 4, bc: { k: "summonMini" }, desc: "【战吼】从你的牌库中随机召唤一个随从,其攻击力和生命值变为 1。" },
+  { id: 38, name: "伺机待发", emoji: "⏳", cost: 0, type: "s", rarity: "e", sp: { k: "ready" }, desc: "你使用的下一张法术牌费用减少 2 点(仅本回合)。" },
+  { id: 39, name: "秘密通道", emoji: "🚪", cost: 2, type: "s", rarity: "e", sp: { k: "passage" }, desc: "将你的手牌替换为牌库中随机 4 张牌,回合结束时换回。" },
+  { id: 40, name: "换挡漂移", emoji: "🏎️", cost: 1, type: "s", rarity: "r", sp: { k: "shuffleDraw", back: 2, draw: 3 }, desc: "将你手牌最左侧的 2 张牌洗回牌库,抽 3 张牌。" },
+  { id: 41, name: "街舞起跳", emoji: "🕺", cost: 1, type: "s", rarity: "e", sp: { k: "bounce", t: "fm" }, desc: "将一个友方随从移回手牌,并召唤一个具有相同属性值的「舞者」。" },
+  { id: 42, name: "殒命暗影", emoji: "🌑", cost: 0, type: "s", rarity: "l", sp: { k: "shadow" }, desc: "该牌会变成你打出的上一张法术牌的复制。" },
+  { id: 43, name: "暗影之门", emoji: "🌀", cost: 1, type: "s", rarity: "r", sp: { k: "spelldraw" }, desc: "从你的牌库中随机抽一张法术牌。" },
+  { id: 44, name: "伪造的幸运币", emoji: "🪙", cost: 0, type: "s", rarity: "r", sp: { k: "coin" }, desc: "在本回合中获得一个法力水晶。" },
+  { id: 45, name: "奥术巨人", emoji: "🔮", cost: 12, type: "m", rarity: "e", atk: 8, hp: 8, costScale: "spellsPlayed", desc: "在本局对战中你每使用过一张法术牌,本随从的法力消耗减少 1 点。" },
 ];
 // token 衍生牌:不进 POOL(不出现在牌组构建器),单独注册进 byId
 export const COIN: Card = { id: 99, name: "幸运币", emoji: "🪙", cost: 0, type: "s", rarity: "c", sp: { k: "coin" }, token: 1, desc: "在本回合获得一个法力水晶。" };
 export const GHOUL: Card = { id: 98, name: "食尸鬼", emoji: "🧟", cost: 5, type: "m", rarity: "c", atk: 5, hp: 5, token: 1, desc: "由「终极感染」召唤。" };
+// 舞者:由「街舞起跳」召唤,攻/血在召唤时继承自被弹回的随从(此处 atk/hp 仅占位)
+export const DANCER: Card = { id: 97, name: "舞者", emoji: "💃", cost: 0, type: "m", rarity: "c", atk: 0, hp: 0, rush: 1, token: 1, desc: "【突袭】由「街舞起跳」召唤,属性继承自被移回手牌的随从。" };
 export const RARITY: Record<Rarity, { label: string; color: string }> = {
   c: { label: "普通", color: "#cfd6dd" },
   r: { label: "稀有", color: "#4da3ff" },
@@ -54,10 +64,11 @@ export const byId: Record<number, Card> = {};
 POOL.forEach((c) => (byId[c.id] = c));
 byId[COIN.id] = COIN;
 byId[GHOUL.id] = GHOUL;
+byId[DANCER.id] = DANCER;
 export const HAND_LIMIT = 10; // 手牌上限,超出时抽到的牌会被烧掉
 
-export const kw = (c: { taunt?: boolean | 1; charge?: boolean | 1 }) =>
-  `${c.taunt ? "【嘲讽】" : ""}${c.charge ? "【冲锋】" : ""}`;
+export const kw = (c: { taunt?: boolean | 1; charge?: boolean | 1; rush?: boolean | 1 }) =>
+  `${c.taunt ? "【嘲讽】" : ""}${c.charge ? "【冲锋】" : ""}${c.rush ? "【突袭】" : ""}`;
 
 // 法术的目标类型:"any" 任意角色 / "fm" 友方随从 / undefined 无目标
 export const spTarget = (sp?: SpellDef): SpellTargetKind | undefined => (sp && "t" in sp ? sp.t : undefined);

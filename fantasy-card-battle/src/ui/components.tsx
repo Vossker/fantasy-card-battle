@@ -1,9 +1,9 @@
 // ================= 展示组件(模块顶层,避免每次渲染重挂载导致 transition 失效) =================
 // 新增展示组件请保持定义在模块顶层的写法,不要移回主组件内部
 import type { ReactNode } from "react";
-import { byId, RARITY } from "../cards";
+import { RARITY } from "../cards";
 import { spSummary } from "../engine";
-import type { HandEntry, Minion, Side, SideState } from "../types";
+import type { Card, Minion, Side, SideState } from "../types";
 
 export const CSS = `
 @keyframes fUp{0%{opacity:1;transform:translate(-50%,0) scale(1.25)}100%{opacity:0;transform:translate(-50%,-36px) scale(.9)}}
@@ -27,11 +27,12 @@ export const MinionEl = ({ side, m, myTurn, selAtk, isT, clickEntity, floats }: 
   isT: IsTargetFn; clickEntity: ClickEntityFn; floats: FloatsFn;
 }) => {
   const mine = side === "p";
-  const ready = mine && myTurn && !m.sick && !m.attacked;
+  const ready = mine && myTurn && !m.attacked && (!m.sick || m.rush); // 突袭随从在 sick 期间也可行动(打随从)
   const sel = selAtk === m.uid;
   const tgt = isT(side, m.uid);
   return (
     <div
+      data-muid={`${side}-${m.uid}`}
       onClick={(e) => { e.stopPropagation(); clickEntity(side, m.uid); }}
       style={{
         width: 58, height: 74, borderRadius: m.taunt ? 18 : 10, position: "relative", cursor: "pointer", flexShrink: 0,
@@ -45,7 +46,8 @@ export const MinionEl = ({ side, m, myTurn, selAtk, isT, clickEntity, floats }: 
       <span style={{ fontSize: 26 }}>{m.emoji}</span>
       {m.taunt && <span style={{ position: "absolute", top: -9, left: "50%", transform: "translateX(-50%)", fontSize: 11 }}>🛡️</span>}
       {m.charge && <span style={{ position: "absolute", top: 2, right: 3, fontSize: 9 }}>⚡</span>}
-      {m.sick && mine && <span style={{ position: "absolute", top: 2, left: 3, fontSize: 9 }}>💤</span>}
+      {m.rush && !m.charge && <span title="突袭" style={{ position: "absolute", top: 2, right: 3, fontSize: 9 }}>💨</span>}
+      {m.sick && !m.rush && mine && <span style={{ position: "absolute", top: 2, left: 3, fontSize: 9 }}>💤</span>}
       <Badge pos="bl" v={m.atk} bg="#b8860b" />
       <Badge pos="br" v={m.hp} bg={m.hp < m.maxHp ? "#dc2626" : "#7f1d1d"} />
       {floats("m" + m.uid)}
@@ -75,17 +77,17 @@ export const HeroEl = ({ side, h, isT, clickEntity, floats }: {
   );
 };
 
-export const HandCard = ({ en, i, selHand, mana, myTurn, handleHand, setHovHand, cost, bonus }: {
-  en: HandEntry; i: number; selHand: number | null; mana: number; myTurn: boolean;
+export const HandCard = ({ c, transformed, i, selHand, mana, myTurn, handleHand, setHovHand, cost, bonus }: {
+  c: Card; transformed: boolean; i: number; selHand: number | null; mana: number; myTurn: boolean;
   handleHand: (i: number) => void; setHovHand: (i: number | null) => void;
   cost: number; bonus: number;
 }) => {
-  const c = byId[en.cid];
   const sel = selHand === i;
   const afford = cost <= mana && myTurn;
   const discounted = cost < c.cost;
   return (
     <div
+      data-hand={i}
       onClick={(e) => { e.stopPropagation(); handleHand(i); }}
       onMouseEnter={() => setHovHand(i)}
       style={{
@@ -94,8 +96,8 @@ export const HandCard = ({ en, i, selHand, mana, myTurn, handleHand, setHovHand,
         transform: sel ? "translateY(-16px) scale(1.12)" : "none", transition: "transform .15s",
         zIndex: sel ? 40 : 10 + i,
         background: c.type === "m" ? "linear-gradient(170deg,#7a5c33,#4a3517 70%)" : "linear-gradient(170deg,#3d4f8a,#23284e 70%)",
-        border: sel ? "2px solid #ffd700" : "2px solid " + (c.type === "m" ? "#caa45c" : "#7d90d8"),
-        boxShadow: sel ? "0 6px 16px rgba(0,0,0,.6),0 0 12px rgba(255,215,0,.5)" : "0 3px 6px rgba(0,0,0,.55)",
+        border: sel ? "2px solid #ffd700" : "2px solid " + (transformed ? "#b66be0" : c.type === "m" ? "#caa45c" : "#7d90d8"),
+        boxShadow: sel ? "0 6px 16px rgba(0,0,0,.6),0 0 12px rgba(255,215,0,.5)" : transformed ? "0 3px 6px rgba(0,0,0,.55),0 0 10px rgba(182,107,224,.7)" : "0 3px 6px rgba(0,0,0,.55)",
         filter: afford ? "none" : "grayscale(.7) brightness(.72)",
         display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2, padding: "4px 2px",
       }}
@@ -104,16 +106,17 @@ export const HandCard = ({ en, i, selHand, mana, myTurn, handleHand, setHovHand,
         {cost}
       </span>
       <span style={{ fontSize: 22, lineHeight: 1 }}>{c.emoji}</span>
-      <span style={{ fontSize: 9, color: c.rarity === "c" ? "#f7ecd2" : RARITY[c.rarity].color, fontWeight: 700, textAlign: "center", lineHeight: 1.15, textShadow: "0 1px 2px #000" }}>{c.name}</span>
+      <span style={{ fontSize: 10, color: c.rarity === "c" ? "#f7ecd2" : RARITY[c.rarity].color, fontWeight: 700, textAlign: "center", lineHeight: 1.15, textShadow: "0 1px 2px #000" }}>{c.name}</span>
       {c.type === "m" ? (
         <>
           <Badge pos="bl" v={c.atk} bg="#b8860b" />
           <Badge pos="br" v={c.hp} bg="#7f1d1d" />
         </>
       ) : (
-        <span style={{ fontSize: 9, color: "#aebdf2", fontWeight: 700 }}>{spSummary(c.sp, bonus)}</span>
+        <span style={{ fontSize: 10, color: "#aebdf2", fontWeight: 700 }}>{spSummary(c.sp, bonus)}</span>
       )}
-      {(c.taunt || c.charge) && <span style={{ position: "absolute", top: 2, right: 2, fontSize: 9 }}>{c.taunt ? "🛡️" : "⚡"}</span>}
+      {(c.taunt || c.charge || c.rush) && <span style={{ position: "absolute", top: 2, right: 2, fontSize: 9 }}>{c.taunt ? "🛡️" : c.charge ? "⚡" : "💨"}</span>}
+      {transformed && <span title="殒命暗影:已变为上一张法术" style={{ position: "absolute", top: -7, right: -6, fontSize: 12, filter: "drop-shadow(0 0 3px #b66be0)" }}>🌑</span>}
     </div>
   );
 };

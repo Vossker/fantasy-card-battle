@@ -26,7 +26,13 @@ export type SpellDef =
   | { k: "choose"; opts: ChooseOpt[] }
   | { k: "camp" }
   | { k: "bloom" }
-  | { k: "moonlight" };
+  | { k: "moonlight" }
+  | { k: "ready" } // 伺机待发:下一张法术减 2 费(仅本回合)
+  | { k: "passage" } // 秘密通道:手牌换成牌库随机 4 张,回合结束换回
+  | { k: "shuffleDraw"; back: number; draw: number } // 换挡漂移:最左 back 张洗回牌库,抽 draw 张
+  | { k: "bounce"; t: "fm" } // 街舞起跳:友方随从回手,召唤同属性"舞者"
+  | { k: "shadow" } // 殒命暗影:在手牌中即变成你上一张打出的法术
+  | { k: "spelldraw" }; // 暗影之门:从牌库随机抽一张法术牌
 
 interface CardBase {
   id: number;
@@ -45,8 +51,10 @@ export interface MinionCard extends CardBase {
   hp: number;
   taunt?: 1;
   charge?: 1;
+  rush?: 1; // 突袭:登场当回合可攻击敌方随从,但不能攻击英雄
   aura?: "cheapSpells";
   bc?: { k: "summonMini" };
+  costScale?: "spellsPlayed"; // 奥术巨人:每使用过一张法术,费用 -1(下限 0)
   sp?: undefined;
 }
 
@@ -57,6 +65,7 @@ export interface SpellCard extends CardBase {
   hp?: undefined;
   taunt?: undefined;
   charge?: undefined;
+  rush?: undefined;
   aura?: undefined;
   bc?: undefined;
 }
@@ -67,6 +76,7 @@ export interface HandEntry {
   uid: number;
   cid: number;
   moon?: number; // 月光指引复制:记录获得复制的回合号
+  borrowed?: 1; // 秘密通道借来的临时牌:回合结束时未打出的会洗回牌库(本回合抽到的牌不带此标记,予以保留)
 }
 
 export interface Minion {
@@ -79,6 +89,7 @@ export interface Minion {
   maxHp: number;
   taunt: boolean;
   charge: boolean;
+  rush: boolean; // 突袭:登场当回合(sick 期间)可攻击敌方随从,但不能攻击英雄
   sick: boolean;
   attacked: boolean;
 }
@@ -90,6 +101,10 @@ export interface SideState {
   maxMana: number;
   fatigue: number;
   spellDmg: number; // 法伤加成,仅持续当前回合(startTurn 时双方清零)
+  spellDiscount?: number; // 伺机待发:下一张法术减费量,仅本回合(startTurn 时本方清零)
+  spellsPlayed?: number; // 本局从手牌打出的法术总数(奥术巨人减费用)
+  lastSpell?: number; // 本局最后一张从手牌打出的法术 cid(殒命暗影复制用)
+  stash?: HandEntry[]; // 秘密通道:被暂存的原手牌,回合结束时取回
   deck: number[];
   hand: HandEntry[];
   board: Minion[];

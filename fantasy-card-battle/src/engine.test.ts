@@ -2,8 +2,8 @@
 import { describe, expect, it } from "vitest";
 import type { GameState, Minion, SideState } from "./types";
 import {
-  castDeckSpell, castSpell, dmgHero, draw, effCost, gainMoonCopy, initGame, moonTutor,
-  playMinion, rand, resolveAttack, spSummary,
+  castDeckSpell, castSpell, dmgHero, draw, effCard, effCost, endTurnCleanup,
+  gainMoonCopy, initGame, moonTutor, playMinion, rand, resolveAttack, spSummary,
 } from "./engine";
 import { byId } from "./cards";
 import { computeAiTurn } from "./ai";
@@ -19,7 +19,7 @@ const mkState = (over: Partial<GameState> = {}): GameState => ({
 });
 const minion = (over: Partial<Minion> = {}): Minion => ({
   uid: 1, cid: 1, name: "测试随从", emoji: "🧪", atk: 1, hp: 1, maxHp: 1,
-  taunt: false, charge: false, sick: false, attacked: false, ...over,
+  taunt: false, charge: false, rush: false, sick: false, attacked: false, ...over,
 });
 
 describe("draw:疲劳与烧牌", () => {
@@ -181,5 +181,125 @@ describe("RNG:可复现性(步骤 4 注入种子的成果)", () => {
         a: { hp: s.a.hp, mana: s.a.mana, deck: s.a.deck, hand: s.a.hand.map((e) => e.cid), board: s.a.board.map((m) => [m.cid, m.atk, m.hp]) },
       }));
     expect(fingerprint(s1)).toEqual(fingerprint(s2));
+  });
+});
+
+describe("新增卡牌机制", () => {
+  it("奥术巨人:每打出过一张法术减 1 费,下限 0", () => {
+    expect(effCost(mkState({ p: side({ spellsPlayed: 3 }) }), "p", byId[45])).toBe(9);
+    expect(effCost(mkState({ p: side({ spellsPlayed: 20 }) }), "p", byId[45])).toBe(0);
+  });
+
+  it("奥术巨人:按折后费用即可打出并扣费", () => {
+    // spellsPlayed=9 → 奥术巨人(id 45,原 12 费)折后 3 费;只有 3 法力也能打出
+    const st = mkState({ p: side({ mana: 3, spellsPlayed: 9, hand: [{ uid: 1, cid: 45 }], board: [] }) });
+    expect(playMinion(st, "p", 0)).toBe(true);
+    expect(st.p.mana).toBe(0); // 扣的是折后 3 费,而非 12
+    expect(st.p.board[0].cid).toBe(45);
+  });
+
+  it("从手牌打出法术会累计 spellsPlayed 并记录 lastSpell", () => {
+    const st = mkState({ p: side({ hand: [{ uid: 1, cid: 18 }] }) });
+    castSpell(st, "p", 0, { side: "a", hero: true });
+    expect(st.p.spellsPlayed).toBe(1);
+    expect(st.p.lastSpell).toBe(18);
+  });
+
+  it("伺机待发:下一张法术减 2 费,打出后消耗减费", () => {
+    const st = mkState({ p: side({ mana: 10, hand: [{ uid: 1, cid: 38 }, { uid: 2, cid: 25 }] }) });
+    expect(castSpell(st, "p", 0, null)).toBe(true); // 伺机待发(0 费)
+    expect(st.p.spellDiscount).toBe(2);
+    expect(effCost(st, "p", byId[25])).toBe(2); // 火球术 4 → 2
+    castSpell(st, "p", 0, { side: "a", hero: true }); // 此时火球术在 index 0
+    expect(st.p.mana).toBe(8); // 10 - 0 - 2
+    expect(st.p.spellDiscount).toBe(0); // 已消耗
+  });
+
+  it("殒命暗影:effCard 解析为上一张打出的法术,无则保持原牌", () => {
+    const st = mkState({ p: side() });
+    expect(effCard(st, "p", { uid: 1, cid: 42 }).id).toBe(42); // 未打过法术 → 仍为自身(不可打出)
+    st.p.lastSpell = 18;
+    expect(effCard(st, "p", { uid: 1, cid: 42 }).id).toBe(18); // 变为闪电箭
+  });
+
+  it("换挡漂移:最左 2 张洗回牌库,抽 3 张", () => {
+    const st = mkState({ p: side({ mana: 10, hand: [{ uid: 1, cid: 40 }, { uid: 2, cid: 18 }, { uid: 3, cid: 20 }], deck: [21, 22, 23, 24, 25] }) });
+    castSpell(st, "p", 0, null);
+    expect(st.p.hand.length).toBe(3); // 离手后剩 2 张洗回,抽 3
+    expect(st.p.deck.length).toBe(4); // 5 + 2 - 3
+  });
+
+  it("暗影之门:从牌库随机抽一张法术牌", () => {
+    const st = mkState({ p: side({ mana: 10, hand: [{ uid: 1, cid: 43 }], deck: [1, 2, 18] }) });
+    castSpell(st, "p", 0, null);
+    expect(st.p.hand.map((e) => e.cid)).toEqual([18]); // 只有 18 是法术
+    expect([...st.p.deck].sort((a, b) => a - b)).toEqual([1, 2]);
+  });
+
+  it("秘密通道:换手牌并在回合结束换回原手牌", () => {
+    const st = mkState({ p: side({ mana: 10, hand: [{ uid: 1, cid: 39 }, { uid: 2, cid: 18 }], deck: [20, 21, 22, 23, 24, 25] }) });
+    castSpell(st, "p", 0, null);
+    expect(st.p.hand.length).toBe(4); // 抽 4 张临时手牌
+    expect(st.p.stash?.map((e) => e.cid)).toEqual([18]); // 原手牌暂存
+    expect(st.p.deck.length).toBe(2);
+    endTurnCleanup(st, "p");
+    expect(st.p.hand.map((e) => e.cid)).toEqual([18]); // 取回原手牌
+    expect(st.p.deck.length).toBe(6); // 未打出的临时牌洗回
+    expect(st.p.stash).toBeUndefined();
+  });
+
+  it("秘密通道:本回合抽到的牌不被洗回,只洗回未打出的借牌", () => {
+    const st = mkState({ p: side({ mana: 10, hand: [{ uid: 1, cid: 39 }, { uid: 2, cid: 18 }], deck: [20, 21, 22, 23, 24, 25] }) });
+    castSpell(st, "p", 0, null); // 借 4 张(标记 borrowed),牌库剩 2 张
+    draw(st, "p", 1); // 模拟用借牌(如暗影之门)抽到一张新牌(不带 borrowed)
+    expect(st.p.hand.length).toBe(5); // 4 借 + 1 抽
+    endTurnCleanup(st, "p");
+    expect([...st.p.hand.map((e) => e.cid)].sort((a, b) => a - b)).toEqual([18, 21]); // 原手牌 + 抽到的牌
+    expect(st.p.deck.length).toBe(5); // 1 张剩余 + 4 张借牌洗回
+    expect(st.p.hand.some((e) => e.borrowed)).toBe(false);
+  });
+
+  it("街舞起跳:友方随从回手并召唤继承当前属性的舞者", () => {
+    const m = minion({ uid: 5, cid: 9, atk: 4, hp: 2, maxHp: 2 }); // 暗影刺客
+    const st = mkState({ p: side({ mana: 10, hand: [{ uid: 1, cid: 41 }], board: [m] }) });
+    castSpell(st, "p", 0, { side: "p", uid: 5 });
+    expect(st.p.hand.map((e) => e.cid)).toEqual([9]); // 随从回手(原始卡)
+    expect(st.p.board.length).toBe(1);
+    expect(st.p.board[0].cid).toBe(97); // 舞者 token
+    expect([st.p.board[0].atk, st.p.board[0].hp]).toEqual([4, 2]); // 继承当前攻/血
+    expect(st.p.board[0].sick).toBe(true); // 召唤失调
+  });
+
+  it("伪造的幸运币:与幸运币同效,本回合 +1 法力", () => {
+    const st = mkState({ p: side({ mana: 3, maxMana: 5, hand: [{ uid: 1, cid: 44 }] }) });
+    castSpell(st, "p", 0, null);
+    expect(st.p.mana).toBe(4);
+  });
+});
+
+describe("突袭关键词", () => {
+  it("突袭随从登场当回合(sick)可攻击随从,但不能攻击英雄", () => {
+    const st = mkState({
+      p: side({ board: [minion({ uid: 1, atk: 3, hp: 3, rush: true, sick: true })] }),
+      a: side({ hp: 30, board: [minion({ uid: 2, atk: 1, hp: 2 })] }),
+    });
+    expect(resolveAttack(st, "p", 1, { hero: true })).toBe(false); // 不能打脸
+    expect(resolveAttack(st, "p", 1, { uid: 2 })).toBe(true); // 可以打随从
+    expect(st.a.board.length).toBe(0); // 敌方随从被消灭
+  });
+
+  it("突袭随从在下一回合(sick 清除后)可攻击英雄", () => {
+    const st = mkState({ p: side({ board: [minion({ uid: 1, atk: 3, hp: 3, rush: true, sick: false })] }), a: side({ hp: 30 }) });
+    expect(resolveAttack(st, "p", 1, { hero: true })).toBe(true);
+    expect(st.a.hp).toBe(27);
+  });
+
+  it("街舞起跳召唤的舞者带突袭且本回合召唤失调", () => {
+    const st = mkState({ p: side({ mana: 10, hand: [{ uid: 1, cid: 41 }], board: [minion({ uid: 5, cid: 9, atk: 4, hp: 2, maxHp: 2 })] }) });
+    castSpell(st, "p", 0, { side: "p", uid: 5 });
+    const dancer = st.p.board[0];
+    expect(dancer.cid).toBe(97);
+    expect(dancer.rush).toBe(true);
+    expect(dancer.sick).toBe(true);
   });
 });

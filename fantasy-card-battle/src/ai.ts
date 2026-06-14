@@ -3,9 +3,9 @@
 // 抉择类法术 AI 不走弹窗:在分支内手动扣费 + splice 手牌,按启发式直接结算(与玩家的延迟支付路径不同)。
 import { byId, HAND_LIMIT } from "./cards";
 import {
-  applyOpt, campEffect, campLabel, castDeckSpell, castSpell, clone, effCost,
-  gainMoonCopy, log, moonTutor, playMinion, removeFromDeck, resolveAttack,
-  sampleDeck, sampleDeckAny, startTurn, summonFromDeck,
+  afterSpellPlayed, applyOpt, campEffect, campLabel, castDeckSpell, castSpell, clone,
+  effCard, effCost, endTurnCleanup, gainMoonCopy, log, moonTutor, playMinion,
+  removeFromDeck, resolveAttack, sampleDeck, sampleDeckAny, startTurn, summonFromDeck,
 } from "./engine";
 import type { AttackTarget, Card, GameState, MinionCard } from "./types";
 
@@ -14,7 +14,8 @@ const spDmgN = (c: Card): number => (c.sp && (c.sp.k === "dmg" || c.sp.k === "ao
 
 export function aiPlay(st: GameState): boolean {
   const A = st.a, P = st.p;
-  const hand = A.hand.map((e, i) => ({ i, c: byId[e.cid] }));
+  // effCard 解析殒命暗影:在手牌中即视为上一张打出的法术(无可复制时仍为原牌,不会被任何分支选中)
+  const hand = A.hand.map((e, i) => ({ i, c: effCard(st, "a", e) }));
   const can = hand.filter((h) => effCost(st, "a", h.c) <= A.mana);
   if (!can.length) return false;
   const dmg = can.filter((h) => h.c.sp?.k === "dmg").sort((x, y) => spDmgN(y.c) - spDmgN(x.c));
@@ -74,6 +75,7 @@ export function aiPlay(st: GameState): boolean {
       const en2 = A.hand[bloom.i];
       A.mana -= effCost(st, "a", bloom.c);
       A.hand.splice(bloom.i, 1);
+      afterSpellPlayed(st, "a", bloom.c.id);
       moonTutor(st, "a", en2);
       if (mOk) {
         const pick = sampleDeck(st, "a", "m").sort((x, y) => byId[y].cost - byId[x].cost)[0];
@@ -95,6 +97,7 @@ export function aiPlay(st: GameState): boolean {
     const en2 = A.hand[camp.i];
     A.mana -= effCost(st, "a", camp.c);
     A.hand.splice(camp.i, 1);
+    afterSpellPlayed(st, "a", camp.c.id);
     moonTutor(st, "a", en2);
     const picked: string[] = [];
     for (let k = 0; k < 3; k++) {
@@ -115,6 +118,7 @@ export function aiPlay(st: GameState): boolean {
     const en2 = A.hand[chooser.i];
     A.mana -= effCost(st, "a", chooser.c);
     A.hand.splice(chooser.i, 1);
+    afterSpellPlayed(st, "a", chooser.c.id);
     moonTutor(st, "a", en2);
     applyOpt(st, "a", pick);
     log(st, `对手施放「${chooser.c.name}」,抉择了${pick.label}`);
@@ -142,6 +146,7 @@ export function aiPlay(st: GameState): boolean {
     const en2 = A.hand[moon.i];
     A.mana -= effCost(st, "a", moon.c);
     A.hand.splice(moon.i, 1);
+    afterSpellPlayed(st, "a", moon.c.id);
     moonTutor(st, "a", en2);
     const pick = sampleDeckAny(st, "a").sort((x, y) => byId[y].cost - byId[x].cost)[0];
     gainMoonCopy(st, "a", pick);
@@ -175,6 +180,32 @@ export function aiPlay(st: GameState): boolean {
       return true;
     }
   }
+  // 暗影之门:牌库还有法术且手牌未满时补法术
+  const sdraw = can.find((h) => h.c.sp?.k === "spelldraw");
+  if (sdraw && A.hand.length < HAND_LIMIT && A.deck.some((cid) => byId[cid].type === "s")) {
+    if (castSpell(st, "a", sdraw.i, null)) { log(st, `对手使用了「${sdraw.c.name}」`); return true; }
+  }
+  // 换挡漂移:手牌不多时循环过牌(净 +1 张)
+  const regear = can.find((h) => h.c.sp?.k === "shuffleDraw");
+  if (regear && A.hand.length <= 6 && A.deck.length > 3) {
+    if (castSpell(st, "a", regear.i, null)) { log(st, `对手使用了「${regear.c.name}」`); return true; }
+  }
+  // 街舞起跳:复制场上最强随从(有随从且未满场)
+  const dance = can.find((h) => h.c.sp?.k === "bounce");
+  if (dance && A.board.length && A.board.length < 6) {
+    const m = [...A.board].sort((a, b) => b.atk + b.hp - (a.atk + a.hp))[0];
+    if (castSpell(st, "a", dance.i, { side: "a", uid: m.uid })) { log(st, `对手对「${m.name}」使用了「${dance.c.name}」`); return true; }
+  }
+  // 伺机待发:手中有"减 2 费后才打得起"的法术时先铺垫(下一轮 aiPlay 会接着打出)
+  const ready = can.find((h) => h.c.sp?.k === "ready");
+  if (ready && hand.some((h) => h.c.type === "s" && h.c.sp?.k !== "ready" && effCost(st, "a", h.c) > A.mana && effCost(st, "a", h.c) - 2 <= A.mana)) {
+    if (castSpell(st, "a", ready.i, null)) { log(st, `对手使用了「${ready.c.name}」,下一张法术费用降低`); return true; }
+  }
+  // 秘密通道:手牌偏少时换一手新牌(回合结束自动换回)
+  const passage = can.find((h) => h.c.sp?.k === "passage");
+  if (passage && !A.stash && A.hand.length <= 3 && A.deck.length >= 4) {
+    if (castSpell(st, "a", passage.i, null)) { log(st, `对手施放了「${passage.c.name}」`); return true; }
+  }
   // 残局烧脸
   if (dmg.length && P.hp <= 15) {
     if (castSpell(st, "a", dmg[0].i, { side: "p", hero: true })) {
@@ -185,33 +216,43 @@ export function aiPlay(st: GameState): boolean {
   return false;
 }
 export function aiAttack(st: GameState): boolean {
-  const ready = st.a.board.filter((m) => !m.sick && !m.attacked && m.atk > 0);
-  if (!ready.length) return false;
-  const m = ready[0];
   const taunts = st.p.board.filter((x) => x.taunt);
-  let tgt: AttackTarget, tname = "";
-  if (taunts.length) {
-    const t =
-      taunts.find((t) => m.atk >= t.hp && t.atk < m.hp) ||
-      taunts.find((t) => m.atk >= t.hp) ||
-      [...taunts].sort((a, b) => a.hp - b.hp)[0];
-    tgt = { uid: t.uid }; tname = t.name;
-  } else {
-    const total = ready.reduce((s, x) => s + x.atk, 0);
-    if (total >= st.p.hp + (st.p.armor || 0)) tgt = { hero: true };
-    else {
+  // 突袭随从在召唤失调(sick)期间也能攻击,但只能打随从(下面 canHero 处理)
+  const ready = st.a.board.filter((m) => !m.attacked && m.atk > 0 && (!m.sick || m.rush));
+  if (!ready.length) return false;
+  // 斩杀总伤只统计"能打英雄"的随从(非召唤失调);突袭随从这回合打不了脸
+  const faceTotal = ready.filter((m) => !m.sick).reduce((s, m) => s + m.atk, 0);
+  const lethal = faceTotal >= st.p.hp + (st.p.armor || 0);
+  // 逐个挑出"有有效攻击目标"的随从,避免突袭随从无合适目标时卡住整轮攻击
+  for (const m of ready) {
+    const canHero = !m.sick; // 召唤失调的突袭随从不能攻击英雄
+    let tgt: AttackTarget | null = null, tname = "";
+    if (taunts.length) {
+      const t =
+        taunts.find((t) => m.atk >= t.hp && t.atk < m.hp) ||
+        taunts.find((t) => m.atk >= t.hp) ||
+        [...taunts].sort((a, b) => a.hp - b.hp)[0];
+      tgt = { uid: t.uid }; tname = t.name;
+    } else if (canHero && lethal) {
+      tgt = { hero: true };
+    } else {
       const good = st.p.board.filter(
         (t) => m.atk >= t.hp && (t.atk >= 3 || t.atk + t.hp >= m.atk + m.hp) && (t.atk < m.hp || t.atk + t.hp > m.atk + m.hp)
       );
       if (good.length) {
         const t = good.sort((a, b) => b.atk + b.hp - (a.atk + a.hp))[0];
         tgt = { uid: t.uid }; tname = t.name;
-      } else tgt = { hero: true };
+      } else if (canHero) {
+        tgt = { hero: true };
+      }
+      // 否则:突袭随从无合适随从可打且打不了脸 → 跳过,尝试下一个随从
+    }
+    if (tgt && resolveAttack(st, "a", m.uid, tgt)) {
+      log(st, `对手的「${m.name}」攻击了${tgt.hero ? "你的英雄" : `「${tname}」`}`);
+      return true;
     }
   }
-  if (!resolveAttack(st, "a", m.uid, tgt)) return false;
-  log(st, `对手的「${m.name}」攻击了${tgt.hero ? "你的英雄" : `「${tname}」`}`);
-  return true;
+  return false;
 }
 // 克隆 state → 跑完整个 AI 回合 → 产出快照数组,UI 层以 750ms 间隔依次回放。
 // ⚠️ AI 回合期间不要另行 setGame,会被后续快照覆盖。
@@ -228,5 +269,6 @@ export function computeAiTurn(b: GameState): GameState[] {
   while (g++ < 12 && !st.winner) { st.fx = []; if (!aiPlay(st)) break; push(); }
   g = 0;
   while (g++ < 12 && !st.winner) { st.fx = []; if (!aiAttack(st)) break; push(); }
+  if (st.a.stash) { st.fx = []; endTurnCleanup(st, "a"); push(); } // 秘密通道:回合结束换回手牌
   return snaps;
 }
