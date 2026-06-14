@@ -7,7 +7,7 @@ import type {
 } from "./types";
 
 // 模块级自增全局变量:HMR 热更新后继续累加,不要假设从 1 开始
-let UID = 1, FXID = 1;
+let UID = 1, FXID = 1, ENTRY = 1; // ENTRY:登场顺序时钟(每次随从上场 / 洛欧塞布加税生效各取一格)
 
 export const clone = <T>(o: T): T => JSON.parse(JSON.stringify(o));
 export const other = (s: Side): Side => (s === "p" ? "a" : "p");
@@ -55,6 +55,21 @@ export function dmgMinion(st: GameState, side: Side, uid: number, n: number) {
   fx(st, "m" + uid, "-" + n, "#ff6060");
   if (m.hp <= 0) st[side].board = st[side].board.filter((x) => x.uid !== uid);
 }
+// 冻结一个随从(若它已因伤害死亡则跳过)。被冻结者下一个能攻击的回合无法攻击,该回合结束时由 thawFrozen 解冻。
+export function freezeMinion(st: GameState, side: Side, uid: number) {
+  const m = st[side].board.find((x) => x.uid === uid);
+  if (!m || m.frozen) return;
+  m.frozen = true;
+  fx(st, "m" + uid, "❄️冻结", "#bfe9ff");
+}
+// 解冻所属一方的随从:在该方回合结束时调用,使其冻结恰好覆盖一个能攻击的回合。返回是否有随从被解冻。
+export function thawFrozen(st: GameState, side: Side): boolean {
+  let any = false;
+  st[side].board.forEach((m) => {
+    if (m.frozen) { m.frozen = false; fx(st, "m" + m.uid, "解冻", "#bfe9ff"); any = true; }
+  });
+  return any;
+}
 export function draw(st: GameState, side: Side, n: number) {
   for (let k = 0; k < n; k++) {
     const s = st[side];
@@ -80,9 +95,13 @@ export function startTurn(st: GameState, side: Side) {
   st.p.spellDmg = 0;
   st.a.spellDmg = 0;
   s.spellDiscount = 0; // 伺机待发:仅本回合,本方回合开始时清零
+  s.playedThisTurn = 0; // 连击:本回合已出牌数清零
+  s.spellTax = s.spellTaxNext; // 洛欧塞布:回合开始时把已挂载的加税转为生效;无挂载则顺带清除上一回合的加税
+  s.spellTaxNext = undefined;
   s.maxMana = Math.min(10, s.maxMana + 1);
   s.mana = s.maxMana;
-  s.board.forEach((m) => { m.sick = false; m.attacked = false; });
+  // 登场窗口结束:冲锋/突袭是一次性登场效果,熬过登场回合后清掉(角标随之消失)
+  s.board.forEach((m) => { m.sick = false; m.attacked = false; m.charge = false; m.rush = false; });
   draw(st, side, 1);
 }
 export function playMinion(st: GameState, side: Side, i: number): boolean {
@@ -90,34 +109,46 @@ export function playMinion(st: GameState, side: Side, i: number): boolean {
   if (!s) return false;
   const en = s.hand[i];
   if (!en) return false;
-  const c = byId[en.cid];
+  const c = effCard(st, side, en); // 经此解析属性继承型 token(舞者)的快照属性/费用
   if (!c || c.type !== "m" || s.board.length >= 6) return false;
-  const cost = effCost(st, side, c); // 奥术巨人等按折后费用校验与扣费
+  const cost = effCost(st, side, c, en); // 奥术巨人/暗影步等按折后费用校验与扣费
   if (cost > s.mana) return false;
   s.mana -= cost;
   s.hand.splice(i, 1);
   s.board.push({
     uid: en.uid, cid: c.id, name: c.name, emoji: c.emoji,
     atk: c.atk, hp: c.hp, maxHp: c.hp,
-    taunt: !!c.taunt, charge: !!c.charge, rush: !!c.rush, sick: !c.charge, attacked: false,
+    taunt: !!c.taunt, charge: !!c.charge, rush: !!c.rush, sick: !c.charge, attacked: false, frozen: false, seq: ENTRY++,
   });
   if (c.bc) doBattlecry(st, side, c);
+  s.playedThisTurn = (s.playedThisTurn || 0) + 1; // 连击:打出随从也计入"使用过的牌"
   moonTutor(st, side, en);
+  mapTutor(st, side, en); // 异教地图:本回合打出发现的牌则再抽一张
   return true;
 }
 // 战吼:仅从手牌打出时触发(从牌库召唤不触发)
 function doBattlecry(st: GameState, side: Side, c: MinionCard) {
+  const s = st[side];
   if (c.bc?.k === "summonMini") {
-    const s = st[side];
     const pool = s.deck.filter((cid) => byId[cid].type === "m");
     if (!pool.length || s.board.length >= 6) return;
     const mc = byId[randPick(st, pool)];
     s.board.push({
       uid: UID++, cid: mc.id, name: mc.name, emoji: mc.emoji,
       atk: 1, hp: 1, maxHp: 1,
-      taunt: !!mc.taunt, charge: !!mc.charge, rush: !!mc.rush, sick: !mc.charge, attacked: false,
+      taunt: !!mc.taunt, charge: !!mc.charge, rush: !!mc.rush, sick: !mc.charge, attacked: false, frozen: false, seq: ENTRY++,
     });
     log(st, `「${c.name}」从牌库召唤了「${mc.name}」的 1/1 复制`);
+  } else if (c.bc?.k === "greedyCoin") {
+    // 贪婪的伴侣:此时本体已离手,手牌中只要还有一张当前 2 费牌(含被减费到 2 的奥术巨人、另一张贪婪的伴侣)即满足
+    if (!s.hand.some((e) => effCost(st, side, byId[e.cid], e) === 2)) return;
+    if (s.hand.length >= HAND_LIMIT) { log(st, `「${c.name}」:手牌已满,幸运币被烧掉了`, true); return; }
+    s.hand.push({ uid: UID++, cid: COIN.id });
+    log(st, `「${c.name}」:手牌中有其他 2 费牌,获得一张幸运币`);
+  } else if (c.bc?.k === "loatheb") {
+    const e = other(side);
+    st[e].spellTaxNext = { amt: 5, order: ENTRY++ }; // 取一格登场序:晚于此前登场的伊谢尔,早于此后登场的
+    log(st, `「${c.name}」:${e === "p" ? "你" : "对手"}下个回合法术费用增加 5 点`, true);
   }
 }
 // 月光指引:本回合内打出发现的复制,则从牌库定向抽取本体
@@ -136,6 +167,52 @@ export function moonTutor(st: GameState, side: Side, en: HandEntry) {
   s.hand.push({ uid: UID++, cid });
   log(st, `「月光指引」:${who}打出了复制,从牌库抽取了本体「${byId[cid].name}」`);
 }
+// 连击:本回合在打出当前这张牌之前,是否已使用过其他牌(随从或法术都算)
+export const combo = (st: GameState, side: Side): boolean => (st[side].playedThisTurn || 0) > 0;
+
+// 异教地图(首次发现):抽取 cid 到手,并把剩余未选选项记在该手牌上(本回合打出它则可再抽一张)
+export function mapTake(st: GameState, side: Side, cid: number, left: number[]) {
+  const s = st[side];
+  const who = side === "p" ? "你" : "对手";
+  removeFromDeck(st, side, cid);
+  if (s.hand.length >= HAND_LIMIT) { log(st, `${who}的手牌已满,「${byId[cid].name}」被烧掉了`, true); return; }
+  s.hand.push({ uid: UID++, cid, mapTurn: st.turnNum, mapLeft: left });
+  log(st, `「异教地图」:${who}发现并抽取了「${byId[cid].name}」`);
+}
+// 异教地图(后续):从剩余选项里把 cid 抽到手
+export function mapDrawLeft(st: GameState, side: Side, cid: number) {
+  const s = st[side];
+  const who = side === "p" ? "你" : "对手";
+  removeFromDeck(st, side, cid);
+  if (s.hand.length >= HAND_LIMIT) { log(st, `${who}的手牌已满,「${byId[cid].name}」被烧掉了`, true); return; }
+  s.hand.push({ uid: UID++, cid });
+  log(st, `「异教地图」:${who}又抽取了「${byId[cid].name}」`);
+}
+// 异教地图触发:本回合打出"发现得来的牌"时,从剩余选项再抽一张。
+// 任何"从手牌打出"的路径都应在 moonTutor 之后调用。玩家走弹窗抉择,AI 自动取费用最高者。
+export function mapTutor(st: GameState, side: Side, en: HandEntry) {
+  if (!en || en.mapTurn !== st.turnNum || !en.mapLeft) return;
+  const s = st[side];
+  const opts = en.mapLeft.filter((cid) => s.deck.includes(cid)); // 仍在牌库中的剩余选项
+  if (!opts.length) return;
+  if (side === "p") {
+    st.pending = { k: "mapPick", opts };
+  } else {
+    const pick = [...opts].sort((x, y) => byId[y].cost - byId[x].cost)[0];
+    mapDrawLeft(st, "a", pick);
+  }
+}
+// 探底:把牌库底部(deck 开头)第 idx 张移到牌库顶(deck 末尾);andDraw 为真则随即抽取该牌
+export function dredgePick(st: GameState, side: Side, idx: number, andDraw: boolean) {
+  const s = st[side];
+  const who = side === "p" ? "你" : "对手";
+  if (idx >= 0 && idx < s.deck.length) {
+    const [cid] = s.deck.splice(idx, 1);
+    s.deck.push(cid);
+    log(st, `${who}探底,将「${byId[cid].name}」置于牌库顶`);
+  }
+  if (andDraw) draw(st, side, 1);
+}
 export function gainMoonCopy(st: GameState, side: Side, cid: number) {
   const s = st[side];
   if (s.hand.length >= HAND_LIMIT) {
@@ -151,16 +228,23 @@ export function sampleDeckAny(st: GameState, side: Side): number[] {
 }
 
 // 费用计算(显示与结算的单一来源):
-//   法术 — 伊谢尔光环(变 1 费)优先级高于伺机待发减费:光环在场时直接取 min(1, 原费),不再叠加减费;
+//   法术 — 伊谢尔光环(费用一律变为 1)优先级高于伺机待发减费:光环在场时直接固定为 1(含 0 费牌),不再叠加减费;
 //          无光环时按伺机待发减费,下限 0;
 //   随从 — costScale 随从(奥术巨人)按本方已打出法术数减费,下限 0。
-export const effCost = (st: GameState, side: Side, c: { type: "m" | "s"; cost: number; costScale?: "spellsPlayed" }): number => {
+export const effCost = (st: GameState, side: Side, c: { type: "m" | "s"; cost: number; costScale?: "spellsPlayed" }, en?: HandEntry): number => {
+  const s = st[side];
   if (c.type === "s") {
-    if (st[side].board.some((m) => byId[m.cid]?.aura === "cheapSpells")) return Math.min(1, c.cost); // 光环优先,不叠加减费
-    return Math.max(0, c.cost - (st[side].spellDiscount || 0));
+    // 伊谢尔光环(变 1)与洛欧塞布加税(+amt)可能同时存在,按入场先后裁决:后入场覆盖先入场。
+    const auraM = s.board.find((m) => byId[m.cid]?.aura === "cheapSpells");
+    const tax = s.spellTax;
+    const auraWins = auraM && (!tax || auraM.seq > tax.order); // 光环更晚登场 → 固定为 1
+    if (auraWins) return 1;
+    const base = Math.max(0, c.cost - (s.spellDiscount || 0));
+    return base + (tax ? tax.amt : 0); // 无光环或加税更晚:基础减费后叠加税额(0 费牌也会被加税)
   }
-  if (c.costScale === "spellsPlayed") return Math.max(0, c.cost - (st[side].spellsPlayed || 0));
-  return c.cost;
+  const red = en?.costred || 0; // 暗影步:随从费用减免(仅手牌生效)
+  if (c.costScale === "spellsPlayed") return Math.max(0, c.cost - (s.spellsPlayed || 0) - red);
+  return Math.max(0, c.cost - red);
 };
 
 // 殒命暗影:在手牌中即显示/结算为本方上一张打出的法术。无可复制法术时返回原牌(此时不可打出)。
@@ -171,6 +255,10 @@ export function effCard(st: GameState, side: Side, en: HandEntry): Card {
     const last = st[side].lastSpell;
     if (last != null && byId[last]) return byId[last];
   }
+  // 属性继承型 token(舞者)被弹回手牌:用快照覆盖占位的卡面属性,费用按 round((atk+hp)/2) 计
+  if (c.type === "m" && c.inheritStats && en.atk != null && en.hp != null) {
+    return { ...c, atk: en.atk, hp: en.hp, cost: Math.round((en.atk + en.hp) / 2) };
+  }
   return c;
 }
 
@@ -180,6 +268,7 @@ export function effCard(st: GameState, side: Side, en: HandEntry): Card {
 export function afterSpellPlayed(st: GameState, side: Side, cid: number) {
   const s = st[side];
   s.spellsPlayed = (s.spellsPlayed || 0) + 1;
+  s.playedThisTurn = (s.playedThisTurn || 0) + 1; // 连击:法术计入本回合"使用过的牌"
   s.lastSpell = cid;
   if (byId[cid]?.sp?.k !== "ready") s.spellDiscount = 0;
 }
@@ -193,15 +282,32 @@ function doBounce(st: GameState, side: Side, uid: number) {
   const atk = m.atk, hp = m.hp, cid = m.cid;
   const who = side === "p" ? "你" : "对手";
   s.board.splice(idx, 1);
-  if (s.hand.length < HAND_LIMIT) s.hand.push({ uid: UID++, cid });
-  else log(st, `${who}的手牌已满,「${byId[cid].name}」无法回到手牌`, true);
+  if (s.hand.length < HAND_LIMIT) {
+    // 属性继承型 token(舞者)卡面属性仅占位,须随快照带回当前攻/血,否则再次打出会变 0/0
+    const bc = byId[cid];
+    const back: HandEntry = bc.type === "m" && bc.inheritStats ? { uid: UID++, cid, atk, hp } : { uid: UID++, cid };
+    s.hand.push(back);
+  } else log(st, `${who}的手牌已满,「${byId[cid].name}」无法回到手牌`, true);
   if (s.board.length < 6) {
     s.board.push({
       uid: UID++, cid: DANCER.id, name: DANCER.name, emoji: DANCER.emoji,
-      atk, hp, maxHp: hp, taunt: false, charge: false, rush: true, sick: true, attacked: false,
+      atk, hp, maxHp: hp, taunt: false, charge: false, rush: true, sick: true, attacked: false, frozen: false, seq: ENTRY++,
     });
   }
   log(st, `「街舞起跳」:${byId[cid].name}回到${who === "你" ? "你的" : "对手的"}手牌,召唤了 ${atk}/${hp} 的舞者`);
+}
+
+// 暗影步:将指定友方随从移回手牌(还原为原始卡牌、丢失场上增益),该手牌费用 -2(不叠加,打出后失效)
+function doShadowstep(st: GameState, side: Side, uid: number) {
+  const s = st[side];
+  const idx = s.board.findIndex((m) => m.uid === uid);
+  if (idx < 0) return;
+  const cid = s.board[idx].cid;
+  const who = side === "p" ? "你" : "对手";
+  s.board.splice(idx, 1);
+  if (s.hand.length < HAND_LIMIT) s.hand.push({ uid: UID++, cid, costred: 2 });
+  else log(st, `${who}的手牌已满,「${byId[cid].name}」无法回到手牌`, true);
+  log(st, `「暗影步」:「${byId[cid].name}」回到${who === "你" ? "你的" : "对手的"}手牌,费用减少 2 点`);
 }
 
 // 秘密通道:把当前手牌暂存,换成牌库随机至多 4 张(本牌须已离手再调用)。
@@ -251,7 +357,7 @@ export function summonFromDeck(st: GameState, side: Side, cid: number): boolean 
   st[side].board.push({
     uid: UID++, cid: c.id, name: c.name, emoji: c.emoji,
     atk: c.atk, hp: c.hp, maxHp: c.hp,
-    taunt: !!c.taunt, charge: !!c.charge, rush: !!c.rush, sick: !c.charge, attacked: false,
+    taunt: !!c.taunt, charge: !!c.charge, rush: !!c.rush, sick: !c.charge, attacked: false, frozen: false, seq: ENTRY++,
   });
   return true;
 }
@@ -284,13 +390,14 @@ type EffectRegistry = { [K in SpellDef["k"]]: EffectHandler<Extract<SpellDef, { 
 
 const EFFECTS: EffectRegistry = {
   dmg: {
-    summary: (sp, bonus) => (bonus > 0 ? `伤害* ${sp.n + bonus} *` : `伤害 ${sp.n}`),
+    summary: (sp, bonus) => `${bonus > 0 ? `伤害* ${sp.n + bonus} *` : `伤害 ${sp.n}`}${sp.freeze ? " ❄️" : ""}`,
     cast: (st, side, sp, tgt, bonus) => {
       const t = tgt!; // isValidSpellTarget 已保证非空
       const n = sp.n + bonus;
       if (t.hero) dmgHero(st, t.side, n);
-      else dmgMinion(st, t.side, t.uid!, n);
+      else { dmgMinion(st, t.side, t.uid!, n); if (sp.freeze) freezeMinion(st, t.side, t.uid!); }
       dmgExtras(st, side, sp);
+      if (sp.comboDraw && combo(st, side)) draw(st, side, 1); // 鬼魅攻击:连击则抽一张
     },
     autoCast: (st, side, sp, bonus) => {
       const e = other(side);
@@ -299,8 +406,9 @@ const EFFECTS: EffectRegistry = {
       tgts.push({ hero: true });
       const t = randPick(st, tgts);
       if (t.hero) dmgHero(st, e, n);
-      else dmgMinion(st, e, t.uid!, n);
+      else { dmgMinion(st, e, t.uid!, n); if (sp.freeze) freezeMinion(st, e, t.uid!); }
       dmgExtras(st, side, sp);
+      if (sp.comboDraw && combo(st, side)) draw(st, side, 1);
     },
   },
   aoe: {
@@ -484,6 +592,38 @@ const EFFECTS: EffectRegistry = {
     cast: (st, side) => drawSpell(st, side),
     autoCast: (st, side) => drawSpell(st, side),
   },
+  shadowstep: {
+    summary: () => "随从回手 -2",
+    cast: (st, side, _sp, tgt) => { if (tgt?.uid != null) doShadowstep(st, side, tgt.uid); },
+    autoCast: (st, side) => {
+      const board = st[side].board;
+      if (!board.length) return;
+      const m = [...board].sort((a, b) => b.atk + b.hp - (a.atk + a.hp))[0]; // 自动取最强随从回手
+      doShadowstep(st, side, m.uid);
+    },
+  },
+  dredge: {
+    summary: (sp) => (sp.comboDraw ? "探底·连击抽" : "探底"),
+    // 从手牌打出走 UI 的探底弹窗;autoCast(夜影花蕾翻出)自动把底部费用最高的牌置顶,连击则抽取
+    autoCast: (st, side, sp) => {
+      const n = Math.min(3, st[side].deck.length);
+      const andDraw = !!sp.comboDraw && combo(st, side);
+      if (!n) { if (andDraw) draw(st, side, 1); return; }
+      let best = 0;
+      for (let k = 1; k < n; k++) if (byId[st[side].deck[k]].cost > byId[st[side].deck[best]].cost) best = k;
+      dredgePick(st, side, best, andDraw);
+    },
+  },
+  map: {
+    summary: () => "发现抽牌",
+    // 从手牌打出走 UI 的发现弹窗;autoCast(夜影花蕾翻出)自动发现费用最高者抽取(仍挂后续触发)
+    autoCast: (st, side) => {
+      const opts = sampleDeckAny(st, side);
+      if (!opts.length) return;
+      const pick = [...opts].sort((x, y) => byId[y].cost - byId[x].cost)[0];
+      mapTake(st, side, pick, opts.filter((c) => c !== pick));
+    },
+  },
 };
 
 // 暗影之门:从牌库随机抽一张法术牌到手(牌库无法术则不触发、无疲劳)
@@ -570,6 +710,7 @@ export function castSpell(st: GameState, side: Side, i: number, tgt: SpellTarget
   handler.cast(st, side, sp, tgt, s.spellDmg || 0);
   afterSpellPlayed(st, side, c.id);
   moonTutor(st, side, en);
+  mapTutor(st, side, en); // 异教地图:本回合打出发现的牌则再抽一张
   return true;
 }
 export function resolveAttack(st: GameState, side: Side, auid: number, tgt: AttackTarget | null): boolean {
@@ -579,19 +720,21 @@ export function resolveAttack(st: GameState, side: Side, auid: number, tgt: Atta
   const defender = st[e];
   if (!attacker || !defender) return false;
   const A = attacker.board.find((m) => m.uid === auid);
-  if (!A || A.attacked || A.atk <= 0) return false;
+  if (!A || A.attacked || A.atk <= 0 || A.frozen) return false; // 冻结的随从无法攻击
   // 召唤失调:不能攻击。突袭随从是例外——在 sick 期间可攻击敌方随从,但仍不能攻击英雄
   if (A.sick && !(A.rush && !tgt.hero)) return false;
   const taunts = defender.board.filter((m) => m.taunt);
   if (tgt.hero) {
     if (taunts.length) return false;
     A.attacked = true;
+    A.charge = false; A.rush = false; // 登场攻击后清掉一次性登场效果(角标随之消失)
     dmgHero(st, e, A.atk);
     return true;
   }
   const D = defender.board.find((m) => m.uid === tgt.uid);
   if (!D || (taunts.length && !D.taunt)) return false;
   A.attacked = true;
+  A.charge = false; A.rush = false; // 登场攻击后清掉一次性登场效果(角标随之消失)
   const dAtk = D.atk;
   dmgMinion(st, e, D.uid, A.atk);
   dmgMinion(st, side, A.uid, dAtk);

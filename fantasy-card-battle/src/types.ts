@@ -15,7 +15,7 @@ export interface ChooseOpt {
 
 // sp.k 的 discriminated union:新增效果种类后,漏掉某条分发路径会直接成为编译错误
 export type SpellDef =
-  | { k: "dmg"; n: number; t: "any"; draw?: number; armor?: number; summon?: number }
+  | { k: "dmg"; n: number; t: "any"; draw?: number; armor?: number; summon?: number; freeze?: 1; comboDraw?: 1 }
   | { k: "aoe"; n: number }
   | { k: "heal"; n: number; t: "any" }
   | { k: "buff"; a: number; h: number; t: "fm" }
@@ -32,7 +32,10 @@ export type SpellDef =
   | { k: "shuffleDraw"; back: number; draw: number } // 换挡漂移:最左 back 张洗回牌库,抽 draw 张
   | { k: "bounce"; t: "fm" } // 街舞起跳:友方随从回手,召唤同属性"舞者"
   | { k: "shadow" } // 殒命暗影:在手牌中即变成你上一张打出的法术
-  | { k: "spelldraw" }; // 暗影之门:从牌库随机抽一张法术牌
+  | { k: "spelldraw" } // 暗影之门:从牌库随机抽一张法术牌
+  | { k: "shadowstep"; t: "fm" } // 暗影步:友方随从回手,其费用 -2(不叠加)
+  | { k: "dredge"; comboDraw?: 1 } // 垂钓时光:探底;连击(本回合先用过其他牌)则抽取置顶的牌
+  | { k: "map" }; // 异教地图:发现并抽一张牌;本回合打出该牌则再从剩余选项抽一张
 
 interface CardBase {
   id: number;
@@ -53,8 +56,9 @@ export interface MinionCard extends CardBase {
   charge?: 1;
   rush?: 1; // 突袭:登场当回合可攻击敌方随从,但不能攻击英雄
   aura?: "cheapSpells";
-  bc?: { k: "summonMini" };
+  bc?: { k: "summonMini" } | { k: "greedyCoin" } | { k: "loatheb" };
   costScale?: "spellsPlayed"; // 奥术巨人:每使用过一张法术,费用 -1(下限 0)
+  inheritStats?: 1; // 属性继承型 token(如舞者):卡面 atk/hp 仅占位,被街舞起跳弹回手牌时记录属性快照
   sp?: undefined;
 }
 
@@ -77,6 +81,11 @@ export interface HandEntry {
   cid: number;
   moon?: number; // 月光指引复制:记录获得复制的回合号
   borrowed?: 1; // 秘密通道借来的临时牌:回合结束时未打出的会洗回牌库(本回合抽到的牌不带此标记,予以保留)
+  costred?: number; // 暗影步:该牌的法力消耗减免(仅对随从有效,不叠加,打出后随上场而消失)
+  mapTurn?: number; // 异教地图:发现并抽到此牌的回合号(本回合打出则触发后续抽取)
+  mapLeft?: number[]; // 异教地图:首次发现时剩余未选的选项(后续从中再抽一张)
+  atk?: number; // 属性继承型 token(如舞者)被弹回手牌时记录的攻击力快照;有快照时打出按此属性上场
+  hp?: number; // 同上,生命值快照;费用按 round((atk+hp)/2) 计(见 effCard)
 }
 
 export interface Minion {
@@ -92,6 +101,8 @@ export interface Minion {
   rush: boolean; // 突袭:登场当回合(sick 期间)可攻击敌方随从,但不能攻击英雄
   sick: boolean;
   attacked: boolean;
+  frozen: boolean; // 冻结:被冻结的随从在其下一个能攻击的回合无法攻击,该回合结束时解冻
+  seq: number; // 登场顺序序号(全局自增):用于裁决伊谢尔光环与洛欧塞布加税的先后,后入场者覆盖先入场者
 }
 
 export interface SideState {
@@ -103,7 +114,10 @@ export interface SideState {
   spellDmg: number; // 法伤加成,仅持续当前回合(startTurn 时双方清零)
   spellDiscount?: number; // 伺机待发:下一张法术减费量,仅本回合(startTurn 时本方清零)
   spellsPlayed?: number; // 本局从手牌打出的法术总数(奥术巨人减费用)
+  playedThisTurn?: number; // 本回合已从手牌使用过的牌数(连击判定:>0 即触发连击;startTurn 清零)
   lastSpell?: number; // 本局最后一张从手牌打出的法术 cid(殒命暗影复制用)
+  spellTax?: { amt: number; order: number }; // 洛欧塞布:本回合内法术费用增加 amt;order 为生效时刻的全局序(与伊谢尔光环比入场先后,后者覆盖前者)
+  spellTaxNext?: { amt: number; order: number }; // 洛欧塞布:已挂载、将在本方下个回合生效的加税(startTurn 时转为 spellTax)
   stash?: HandEntry[]; // 秘密通道:被暂存的原手牌,回合结束时取回
   deck: number[];
   hand: HandEntry[];
@@ -132,7 +146,10 @@ export type Pending =
   | { k: "bloomMode"; i: number }
   | { k: "bloomPick"; mode: BloomMode; opts: number[] }
   | { k: "moonPick"; opts: number[] }
-  | { k: "camp"; remaining: number };
+  | { k: "camp"; remaining: number }
+  | { k: "dredge"; opts: number[]; draw: boolean } // 探底:从牌库底部选 1 张置顶(draw=连击则随即抽取)
+  | { k: "mapDiscover"; opts: number[] } // 异教地图:发现 3 张并抽 1 张
+  | { k: "mapPick"; opts: number[] }; // 异教地图:本回合打出该牌后,从剩余选项再抽 1 张
 
 export interface SpellTarget {
   side: Side;

@@ -4,6 +4,7 @@ import type { GameState, Minion, SideState } from "./types";
 import {
   castDeckSpell, castSpell, dmgHero, draw, effCard, effCost, endTurnCleanup,
   gainMoonCopy, initGame, moonTutor, playMinion, rand, resolveAttack, spSummary,
+  freezeMinion, thawFrozen, startTurn, dredgePick, mapTake, mapTutor,
 } from "./engine";
 import { byId } from "./cards";
 import { computeAiTurn } from "./ai";
@@ -19,7 +20,7 @@ const mkState = (over: Partial<GameState> = {}): GameState => ({
 });
 const minion = (over: Partial<Minion> = {}): Minion => ({
   uid: 1, cid: 1, name: "测试随从", emoji: "🧪", atk: 1, hp: 1, maxHp: 1,
-  taunt: false, charge: false, rush: false, sick: false, attacked: false, ...over,
+  taunt: false, charge: false, rush: false, sick: false, attacked: false, frozen: false, seq: 1, ...over,
 });
 
 describe("draw:疲劳与烧牌", () => {
@@ -95,6 +96,56 @@ describe("effCost:伊谢尔光环减费", () => {
     expect(effCost(st, "p", { type: "s", cost: 4 })).toBe(1);
     // 随从不受影响
     expect(effCost(st, "p", { type: "m", cost: 4 })).toBe(4);
+  });
+  it("伊谢尔在场时 0 费法术也变为 1 费", () => {
+    const st = mkState({ p: side({ board: [minion({ uid: 1, cid: 27 })] }) });
+    expect(effCost(st, "p", { type: "s", cost: 0 })).toBe(1);
+  });
+});
+
+describe("冻结状态", () => {
+  it("寒冰箭(id 20)对存活的随从造成伤害并冻结,被冻结者无法攻击", () => {
+    const st = mkState({
+      p: side({ mana: 5, hand: [{ uid: 1, cid: 20 }] }),
+      a: side({ board: [minion({ uid: 7, atk: 4, hp: 5, sick: false })] }),
+    });
+    expect(castSpell(st, "p", 0, { side: "a", uid: 7 })).toBe(true);
+    const m = st.a.board.find((x) => x.uid === 7)!;
+    expect(m.hp).toBe(2); // 5 - 3
+    expect(m.frozen).toBe(true);
+    expect(resolveAttack(st, "a", 7, { hero: true })).toBe(false); // 冻结无法攻击
+  });
+  it("足够致死时随从死亡,不会留下冻结目标", () => {
+    const st = mkState({
+      p: side({ mana: 5, hand: [{ uid: 1, cid: 20 }] }),
+      a: side({ board: [minion({ uid: 7, atk: 4, hp: 3, sick: false })] }),
+    });
+    expect(castSpell(st, "p", 0, { side: "a", uid: 7 })).toBe(true);
+    expect(st.a.board.length).toBe(0); // 3 伤打死,无残留
+  });
+  it("thawFrozen 解冻后随从可再次攻击", () => {
+    const st = mkState({ a: side({ board: [minion({ uid: 7, atk: 4, hp: 5, sick: false, frozen: true })] }) });
+    expect(thawFrozen(st, "a")).toBe(true);
+    expect(st.a.board[0].frozen).toBe(false);
+    expect(resolveAttack(st, "a", 7, { hero: true })).toBe(true);
+  });
+  it("freezeMinion 对已不在场的随从无副作用", () => {
+    const st = mkState({ a: side({ board: [] }) });
+    expect(() => freezeMinion(st, "a", 99)).not.toThrow();
+  });
+});
+
+describe("一次性登场效果:攻击后清除", () => {
+  it("冲锋随从登场攻击后 charge 角标清除", () => {
+    const st = mkState({ p: side({ board: [minion({ uid: 1, atk: 2, hp: 2, charge: true, sick: false })] }), a: side({ hp: 30 }) });
+    expect(resolveAttack(st, "p", 1, { hero: true })).toBe(true);
+    expect(st.p.board[0].charge).toBe(false);
+  });
+  it("熬过登场回合后,startTurn 清除未使用的 charge/rush", () => {
+    const st = mkState({ p: side({ board: [minion({ uid: 1, charge: true, rush: true, sick: false })] }) });
+    startTurn(st, "p");
+    expect(st.p.board[0].charge).toBe(false);
+    expect(st.p.board[0].rush).toBe(false);
   });
 });
 
@@ -270,6 +321,23 @@ describe("新增卡牌机制", () => {
     expect(st.p.board[0].sick).toBe(true); // 召唤失调
   });
 
+  it("街舞起跳:舞者自身被弹回手牌后再打出仍保留继承属性(不退化为 0/0)", () => {
+    // 场上一个 6/4 的舞者(由先前街舞起跳召唤),再次街舞起跳将其弹回手牌
+    const dancer = minion({ uid: 5, cid: 97, atk: 6, hp: 4, maxHp: 4, rush: true });
+    const st = mkState({ p: side({ mana: 10, hand: [{ uid: 1, cid: 41 }], board: [dancer] }) });
+    castSpell(st, "p", 0, { side: "p", uid: 5 });
+    const back = st.p.hand.find((e) => e.cid === 97)!;
+    expect([back.atk, back.hp]).toEqual([6, 4]); // 手牌条目带回属性快照
+    expect(effCost(st, "p", effCard(st, "p", back), back)).toBe(5); // 费用 = round((6+4)/2)
+    // 把场上召唤出的舞者清掉腾位,打出手牌里的舞者
+    st.p.board = [];
+    const idx = st.p.hand.findIndex((e) => e.uid === back.uid);
+    expect(playMinion(st, "p", idx)).toBe(true);
+    const replayed = st.p.board[0];
+    expect(replayed.cid).toBe(97);
+    expect([replayed.atk, replayed.hp, replayed.maxHp]).toEqual([6, 4, 4]); // 仍是 6/4,而非 0/0
+  });
+
   it("伪造的幸运币:与幸运币同效,本回合 +1 法力", () => {
     const st = mkState({ p: side({ mana: 3, maxMana: 5, hand: [{ uid: 1, cid: 44 }] }) });
     castSpell(st, "p", 0, null);
@@ -301,5 +369,112 @@ describe("突袭关键词", () => {
     expect(dancer.cid).toBe(97);
     expect(dancer.rush).toBe(true);
     expect(dancer.sick).toBe(true);
+  });
+});
+
+// ================= 新增关键词与卡牌 =================
+describe("连击:鬼魅攻击(id49)", () => {
+  it("本回合未出过其他牌时,不抽牌", () => {
+    const st = mkState({ p: side({ hand: [{ uid: 1, cid: 49 }], deck: [18, 20], playedThisTurn: 0 }), a: side({ hp: 30 }) });
+    castSpell(st, "p", 0, { side: "a", hero: true });
+    expect(st.a.hp).toBe(29); // 造成 1 点伤害
+    expect(st.p.hand.length).toBe(0); // 未触发连击,无抽牌
+    expect(st.p.deck.length).toBe(2);
+  });
+  it("本回合先出过牌(连击)时,额外抽一张", () => {
+    const st = mkState({ p: side({ hand: [{ uid: 1, cid: 49 }], deck: [18, 20], playedThisTurn: 1 }), a: side({ hp: 30 }) });
+    castSpell(st, "p", 0, { side: "a", hero: true });
+    expect(st.a.hp).toBe(29);
+    expect(st.p.hand.length).toBe(1); // 连击抽了一张
+    expect(st.p.deck.length).toBe(1);
+  });
+});
+
+describe("探底:dredgePick(id47 垂钓时光)", () => {
+  it("把牌库底部选中的牌置于牌库顶,不抽牌", () => {
+    const st = mkState({ p: side({ deck: [18, 20, 25, 22] }) }); // 底部=deck[0]=18
+    dredgePick(st, "p", 0, false);
+    expect(st.p.deck.length).toBe(4);
+    expect(st.p.deck[st.p.deck.length - 1]).toBe(18); // 18 被置顶(末尾即牌库顶)
+  });
+  it("连击时探底后随即抽取置顶的牌", () => {
+    const st = mkState({ p: side({ deck: [18, 20, 25, 22], hand: [] }) });
+    dredgePick(st, "p", 0, true);
+    expect(st.p.deck.length).toBe(3); // 18 已被抽走
+    expect(st.p.hand.map((e) => e.cid)).toContain(18);
+  });
+});
+
+describe("异教地图:mapTake / mapTutor(id48)", () => {
+  it("发现并抽取选中牌,剩余选项记在手牌上", () => {
+    const st = mkState({ p: side({ deck: [18, 20, 25], hand: [] }) });
+    mapTake(st, "p", 18, [20, 25]);
+    expect(st.p.deck).not.toContain(18);
+    const en = st.p.hand[0];
+    expect(en.cid).toBe(18);
+    expect(en.mapTurn).toBe(st.turnNum);
+    expect(en.mapLeft).toEqual([20, 25]);
+  });
+  it("本回合打出发现牌后,AI 自动从剩余选项再抽一张", () => {
+    const st = mkState({ a: side({ deck: [20, 25], hand: [] }) });
+    const en = { uid: 1, cid: 18, mapTurn: st.turnNum, mapLeft: [20, 25] };
+    mapTutor(st, "a", en); // AI 取费用最高者(火球 id25 cost4 > 寒冰箭 id20 cost2)
+    expect(st.a.hand.map((e) => e.cid)).toContain(25);
+    expect(st.a.deck).not.toContain(25);
+  });
+  it("玩家打出发现牌后弹出后续抉择(mapPick)", () => {
+    const st = mkState({ p: side({ deck: [20, 25], hand: [] }) });
+    const en = { uid: 1, cid: 18, mapTurn: st.turnNum, mapLeft: [20, 25] };
+    mapTutor(st, "p", en);
+    expect(st.pending).toEqual({ k: "mapPick", opts: [20, 25] });
+  });
+});
+
+describe("暗影步(id46)", () => {
+  it("随从回手并使其费用 -2,打出后恢复原消耗、丢失增益", () => {
+    const st = mkState({ p: side({ mana: 10, hand: [{ uid: 1, cid: 46 }], board: [minion({ uid: 5, cid: 13, atk: 9, hp: 9, maxHp: 9 })] }) }); // 独角兽 cost5,被增益到 9/9
+    castSpell(st, "p", 0, { side: "p", uid: 5 });
+    expect(st.p.board.length).toBe(0);
+    const en = st.p.hand.find((e) => e.cid === 13)!;
+    expect(en.costred).toBe(2);
+    expect(effCost(st, "p", byId[13], en)).toBe(3); // 5 - 2
+    const i = st.p.hand.indexOf(en);
+    playMinion(st, "p", i);
+    const m = st.p.board.find((x) => x.cid === 13)!;
+    expect(m.atk).toBe(5); // 回到原始 5/5,增益丢失
+    expect(m.hp).toBe(5);
+  });
+});
+
+describe("贪婪的伴侣(id50)战吼", () => {
+  it("手牌另有 2 费牌时获得幸运币", () => {
+    const st = mkState({ p: side({ mana: 10, hand: [{ uid: 1, cid: 50 }, { uid: 2, cid: 5 }] }) }); // 矮人战士 id5 cost2
+    playMinion(st, "p", 0);
+    expect(st.p.hand.map((e) => e.cid)).toContain(99); // 幸运币
+  });
+  it("手牌无其他 2 费牌时不获得幸运币", () => {
+    const st = mkState({ p: side({ mana: 10, hand: [{ uid: 1, cid: 50 }, { uid: 2, cid: 1 }] }) }); // 农夫 id1 cost1
+    playMinion(st, "p", 0);
+    expect(st.p.hand.map((e) => e.cid)).not.toContain(99);
+  });
+});
+
+describe("洛欧塞布(id51)加税", () => {
+  it("战吼使对手下个回合法术 +5 费,本方不受影响", () => {
+    const st = mkState({ a: side({ mana: 10, hand: [{ uid: 1, cid: 51 }], deck: [18] }), p: side({ deck: [18] }) });
+    playMinion(st, "a", 0);
+    expect(st.p.spellTaxNext).toBeTruthy();
+    startTurn(st, "p"); // 进入玩家回合,加税生效
+    expect(effCost(st, "p", byId[25])).toBe(9); // 火球 4 → 9
+    startTurn(st, "p"); // 再过一个玩家回合,加税清除
+    expect(effCost(st, "p", byId[25])).toBe(4);
+  });
+  it("与伊谢尔光环冲突:后入场者覆盖前者", () => {
+    // 加税更晚登场(order 大于光环随从 seq)→ 税生效,法术为基础+5
+    const taxLater = mkState({ p: side({ board: [minion({ seq: 5, cid: 27 })], spellTax: { amt: 5, order: 100 } }) });
+    expect(effCost(taxLater, "p", byId[25])).toBe(9);
+    // 光环更晚登场(seq 大于加税 order)→ 光环生效,法术固定为 1
+    const auraLater = mkState({ p: side({ board: [minion({ seq: 200, cid: 27 })], spellTax: { amt: 5, order: 100 } }) });
+    expect(effCost(auraLater, "p", byId[25])).toBe(1);
   });
 });

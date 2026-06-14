@@ -21,7 +21,7 @@ export const POOL: Card[] = [
   { id: 17, name: "远古巨龙", emoji: "🐉", cost: 7, type: "m", rarity: "l", atk: 8, hp: 8, desc: "传说中的灾厄。" },
   { id: 18, name: "闪电箭", emoji: "⚡", cost: 1, type: "s", rarity: "c", sp: { k: "dmg", n: 2, t: "any" }, desc: "造成 2 点伤害。" },
   { id: 19, name: "力量祝福", emoji: "💪", cost: 1, type: "s", rarity: "c", sp: { k: "buff", a: 2, h: 0, t: "fm" }, desc: "使一个友方随从 +2 攻击力。" },
-  { id: 20, name: "寒冰箭", emoji: "❄️", cost: 2, type: "s", rarity: "c", sp: { k: "dmg", n: 3, t: "any" }, desc: "造成 3 点伤害。" },
+  { id: 20, name: "寒冰箭", emoji: "❄️", cost: 2, type: "s", rarity: "c", sp: { k: "dmg", n: 3, t: "any", freeze: 1 }, desc: "造成 3 点伤害,并使其冻结。" },
   { id: 21, name: "治疗之光", emoji: "✨", cost: 2, type: "s", rarity: "c", sp: { k: "heal", n: 6, t: "any" }, desc: "恢复 6 点生命值。" },
   { id: 22, name: "奥术智慧", emoji: "📜", cost: 3, type: "s", rarity: "r", sp: { k: "draw", n: 2 }, desc: "抽两张牌。" },
   { id: 23, name: "神圣新星", emoji: "🌟", cost: 3, type: "s", rarity: "r", sp: { k: "aoe", n: 2 }, desc: "对所有敌方随从造成 2 点伤害。" },
@@ -47,12 +47,18 @@ export const POOL: Card[] = [
   { id: 43, name: "暗影之门", emoji: "🌀", cost: 1, type: "s", rarity: "r", sp: { k: "spelldraw" }, desc: "从你的牌库中随机抽一张法术牌。" },
   { id: 44, name: "伪造的幸运币", emoji: "🪙", cost: 0, type: "s", rarity: "r", sp: { k: "coin" }, desc: "在本回合中获得一个法力水晶。" },
   { id: 45, name: "奥术巨人", emoji: "🔮", cost: 12, type: "m", rarity: "e", atk: 8, hp: 8, costScale: "spellsPlayed", desc: "在本局对战中你每使用过一张法术牌,本随从的法力消耗减少 1 点。" },
+  { id: 46, name: "暗影步", emoji: "👣", cost: 0, type: "s", rarity: "r", sp: { k: "shadowstep", t: "fm" }, desc: "将一个友方随从移回手牌,其法力消耗减少 2 点。" },
+  { id: 47, name: "垂钓时光", emoji: "🎣", cost: 1, type: "s", rarity: "r", sp: { k: "dredge", comboDraw: 1 }, desc: "探底。连击:抽取这张牌。" },
+  { id: 48, name: "异教地图", emoji: "🗺️", cost: 2, type: "s", rarity: "r", sp: { k: "map" }, desc: "从牌库中发现一张牌并抽取;如果你在本回合使用这张牌,则从剩余选项中选一张牌并抽取。" },
+  { id: 49, name: "鬼魅攻击", emoji: "👻", cost: 1, type: "s", rarity: "r", sp: { k: "dmg", n: 1, t: "any", comboDraw: 1 }, desc: "造成 1 点伤害。连击:抽一张牌。" },
+  { id: 50, name: "贪婪的伴侣", emoji: "🐀", cost: 2, type: "m", rarity: "r", atk: 2, hp: 3, bc: { k: "greedyCoin" }, desc: "【战吼】如果你手牌中有其他 2 费牌,获得一张幸运币。" },
+  { id: 51, name: "洛欧塞布", emoji: "🦠", cost: 5, type: "m", rarity: "l", atk: 5, hp: 5, bc: { k: "loatheb" }, desc: "【战吼】你的对手下个回合法术的法力消耗增加 5 点。" },
 ];
 // token 衍生牌:不进 POOL(不出现在牌组构建器),单独注册进 byId
 export const COIN: Card = { id: 99, name: "幸运币", emoji: "🪙", cost: 0, type: "s", rarity: "c", sp: { k: "coin" }, token: 1, desc: "在本回合获得一个法力水晶。" };
 export const GHOUL: Card = { id: 98, name: "食尸鬼", emoji: "🧟", cost: 5, type: "m", rarity: "c", atk: 5, hp: 5, token: 1, desc: "由「终极感染」召唤。" };
 // 舞者:由「街舞起跳」召唤,攻/血在召唤时继承自被弹回的随从(此处 atk/hp 仅占位)
-export const DANCER: Card = { id: 97, name: "舞者", emoji: "💃", cost: 0, type: "m", rarity: "c", atk: 0, hp: 0, rush: 1, token: 1, desc: "【突袭】由「街舞起跳」召唤,属性继承自被移回手牌的随从。" };
+export const DANCER: Card = { id: 97, name: "舞者", emoji: "💃", cost: 0, type: "m", rarity: "c", atk: 0, hp: 0, rush: 1, token: 1, inheritStats: 1, desc: "【突袭】由「街舞起跳」召唤,属性继承自被移回手牌的随从。" };
 export const RARITY: Record<Rarity, { label: string; color: string }> = {
   c: { label: "普通", color: "#cfd6dd" },
   r: { label: "稀有", color: "#4da3ff" },

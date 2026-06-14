@@ -4,10 +4,10 @@
 import { byId, HAND_LIMIT } from "./cards";
 import {
   afterSpellPlayed, applyOpt, campEffect, campLabel, castDeckSpell, castSpell, clone,
-  effCard, effCost, endTurnCleanup, gainMoonCopy, log, moonTutor, playMinion,
-  removeFromDeck, resolveAttack, sampleDeck, sampleDeckAny, startTurn, summonFromDeck,
+  dredgePick, effCard, effCost, endTurnCleanup, gainMoonCopy, log, mapTake, moonTutor, playMinion,
+  removeFromDeck, resolveAttack, sampleDeck, sampleDeckAny, startTurn, summonFromDeck, thawFrozen,
 } from "./engine";
-import type { AttackTarget, Card, GameState, MinionCard } from "./types";
+import type { AttackTarget, Card, GameState, HandEntry, MinionCard } from "./types";
 
 // dmg/aoe 法术的基础伤害值(用于排序与斩杀计算)
 const spDmgN = (c: Card): number => (c.sp && (c.sp.k === "dmg" || c.sp.k === "aoe") ? c.sp.n : 0);
@@ -15,8 +15,8 @@ const spDmgN = (c: Card): number => (c.sp && (c.sp.k === "dmg" || c.sp.k === "ao
 export function aiPlay(st: GameState): boolean {
   const A = st.a, P = st.p;
   // effCard 解析殒命暗影:在手牌中即视为上一张打出的法术(无可复制时仍为原牌,不会被任何分支选中)
-  const hand = A.hand.map((e, i) => ({ i, c: effCard(st, "a", e) }));
-  const can = hand.filter((h) => effCost(st, "a", h.c) <= A.mana);
+  const hand = A.hand.map((e, i) => ({ i, c: effCard(st, "a", e), e }));
+  const can = hand.filter((h) => effCost(st, "a", h.c, h.e) <= A.mana);
   if (!can.length) return false;
   const dmg = can.filter((h) => h.c.sp?.k === "dmg").sort((x, y) => spDmgN(y.c) - spDmgN(x.c));
   const bonus = A.spellDmg || 0;
@@ -155,7 +155,7 @@ export function aiPlay(st: GameState): boolean {
   }
   // 铺随从(优先大体格)
   const mins = can
-    .filter((h): h is { i: number; c: MinionCard } => h.c.type === "m")
+    .filter((h): h is { i: number; c: MinionCard; e: HandEntry } => h.c.type === "m")
     .sort((x, y) => y.c.cost - x.c.cost || y.c.atk - x.c.atk);
   if (mins.length && A.board.length < 6) {
     if (playMinion(st, "a", mins[0].i)) {
@@ -196,6 +196,56 @@ export function aiPlay(st: GameState): boolean {
     const m = [...A.board].sort((a, b) => b.atk + b.hp - (a.atk + a.hp))[0];
     if (castSpell(st, "a", dance.i, { side: "a", uid: m.uid })) { log(st, `对手对「${m.name}」使用了「${dance.c.name}」`); return true; }
   }
+  // 异教地图:发现并抽一张(取费用最高);若本回合稍后打出它,触发后续抽取
+  const map = can.find((h) => h.c.sp?.k === "map");
+  if (map && A.hand.length < HAND_LIMIT && A.deck.length) {
+    const en2 = A.hand[map.i];
+    A.mana -= effCost(st, "a", map.c);
+    A.hand.splice(map.i, 1);
+    afterSpellPlayed(st, "a", map.c.id);
+    moonTutor(st, "a", en2);
+    const opts = sampleDeckAny(st, "a");
+    const pick = [...opts].sort((x, y) => byId[y].cost - byId[x].cost)[0];
+    mapTake(st, "a", pick, opts.filter((c) => c !== pick));
+    log(st, `对手施放了「${map.c.name}」`);
+    return true;
+  }
+  // 垂钓时光:探底(底部费用最高者置顶);连击则随即抽取
+  const dredge = can.find((h) => h.c.sp?.k === "dredge");
+  if (dredge && dredge.c.sp?.k === "dredge" && A.deck.length) {
+    const willDraw = !!dredge.c.sp.comboDraw && (A.playedThisTurn || 0) > 0;
+    const en2 = A.hand[dredge.i];
+    A.mana -= effCost(st, "a", dredge.c);
+    A.hand.splice(dredge.i, 1);
+    afterSpellPlayed(st, "a", dredge.c.id);
+    moonTutor(st, "a", en2);
+    const n = Math.min(3, A.deck.length);
+    let best = 0;
+    for (let k = 1; k < n; k++) if (byId[A.deck[k]].cost > byId[A.deck[best]].cost) best = k;
+    dredgePick(st, "a", best, willDraw);
+    log(st, `对手施放了「${dredge.c.name}」`);
+    return true;
+  }
+  // 鬼魅攻击等:连击触发时用小伤害法术换抽牌(优先点掉能击杀的小怪,否则打脸)
+  const cantrip = can.find((h) => h.c.sp?.k === "dmg" && h.c.sp.comboDraw);
+  if (cantrip && cantrip.c.sp?.k === "dmg" && cantrip.c.sp.comboDraw && (A.playedThisTurn || 0) > 0) {
+    const n = spDmgN(cantrip.c) + bonus;
+    const killable = P.board.find((m) => m.hp <= n);
+    const target = killable ? { side: "p" as const, uid: killable.uid } : { side: "p" as const, hero: true };
+    if (castSpell(st, "a", cantrip.i, target)) { log(st, `对手使用了「${cantrip.c.name}」`); return true; }
+  }
+  // 暗影步:回收一个召唤/加税类战吼随从以重施(需本回合能再打出,0 费不占用法力)
+  const sstep = can.find((h) => h.c.sp?.k === "shadowstep");
+  if (sstep && A.board.length) {
+    const reuse = A.board.find((m) => {
+      const cc = byId[m.cid];
+      return !!cc.bc && (cc.bc.k === "summonMini" || cc.bc.k === "loatheb") && Math.max(0, cc.cost - 2) <= A.mana;
+    });
+    if (reuse && castSpell(st, "a", sstep.i, { side: "a", uid: reuse.uid })) {
+      log(st, `对手对「${reuse.name}」使用了「${sstep.c.name}」`);
+      return true;
+    }
+  }
   // 伺机待发:手中有"减 2 费后才打得起"的法术时先铺垫(下一轮 aiPlay 会接着打出)
   const ready = can.find((h) => h.c.sp?.k === "ready");
   if (ready && hand.some((h) => h.c.type === "s" && h.c.sp?.k !== "ready" && effCost(st, "a", h.c) > A.mana && effCost(st, "a", h.c) - 2 <= A.mana)) {
@@ -217,8 +267,8 @@ export function aiPlay(st: GameState): boolean {
 }
 export function aiAttack(st: GameState): boolean {
   const taunts = st.p.board.filter((x) => x.taunt);
-  // 突袭随从在召唤失调(sick)期间也能攻击,但只能打随从(下面 canHero 处理)
-  const ready = st.a.board.filter((m) => !m.attacked && m.atk > 0 && (!m.sick || m.rush));
+  // 突袭随从在召唤失调(sick)期间也能攻击,但只能打随从(下面 canHero 处理);冻结随从本回合无法攻击
+  const ready = st.a.board.filter((m) => !m.attacked && m.atk > 0 && !m.frozen && (!m.sick || m.rush));
   if (!ready.length) return false;
   // 斩杀总伤只统计"能打英雄"的随从(非召唤失调);突袭随从这回合打不了脸
   const faceTotal = ready.filter((m) => !m.sick).reduce((s, m) => s + m.atk, 0);
@@ -270,5 +320,6 @@ export function computeAiTurn(b: GameState): GameState[] {
   g = 0;
   while (g++ < 12 && !st.winner) { st.fx = []; if (!aiAttack(st)) break; push(); }
   if (st.a.stash) { st.fx = []; endTurnCleanup(st, "a"); push(); } // 秘密通道:回合结束换回手牌
+  st.fx = []; if (thawFrozen(st, "a")) push(); // 冻结结算:AI 回合结束时解冻己方随从
   return snaps;
 }

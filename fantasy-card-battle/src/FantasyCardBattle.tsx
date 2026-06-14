@@ -5,9 +5,10 @@ import {
   MAX_DECKS, loadDecks, saveDecks, loadActiveDeckId, saveActiveDeckId, genDeckId, type SavedDeck,
 } from "./cards";
 import {
-  clone, log, effCost, effCard, afterSpellPlayed, endTurnCleanup, initGame, startTurn,
+  clone, log, effCost, effCard, afterSpellPlayed, endTurnCleanup, initGame, startTurn, thawFrozen,
   playMinion, castSpell, castDeckSpell, resolveAttack, removeFromDeck, summonFromDeck,
   sampleDeck, sampleDeckAny, campEffect, campLabel, applyOpt, moonTutor, gainMoonCopy, spSummary,
+  draw, dredgePick, mapTake, mapDrawLeft,
 } from "./engine";
 import { computeAiTurn } from "./ai";
 import { CSS, MinionEl, HeroEl, HandCard, Badge } from "./ui/components";
@@ -27,6 +28,7 @@ export default function ArcaneThrone() {
   const [hovHand, setHovHand] = useState<number | null>(null);
   const [inspect, setInspect] = useState<{ side: Side; uid: number } | null>(null);
   const [showLog, setShowLog] = useState(false);
+  const [showRules, setShowRules] = useState(false); // 主菜单「对战规则」弹窗
   const [confirmSurrender, setConfirmSurrender] = useState(false);
   const [decks, setDecks] = useState<SavedDeck[]>(loadDecks);
   const [activeId, setActiveId] = useState<string | null>(loadActiveDeckId);
@@ -319,6 +321,37 @@ export default function ArcaneThrone() {
       st.pending = null;
     });
   }
+  // 探底:把选中的底牌置于牌库顶;垂钓时光连击(draw)时随即抽取
+  function pickDredge(idx: number) {
+    mutate((st) => {
+      const p = st.pending;
+      if (!p || p.k !== "dredge") return;
+      dredgePick(st, "p", idx, p.draw);
+      st.pending = null;
+    });
+  }
+  // 异教地图:首次发现并抽取选中牌(其余两张记为后续可选项)
+  function pickMapDiscover(idx: number) {
+    mutate((st) => {
+      const p = st.pending;
+      if (!p || p.k !== "mapDiscover") return;
+      const cid = p.opts[idx];
+      if (cid == null) return;
+      mapTake(st, "p", cid, p.opts.filter((_, j) => j !== idx));
+      st.pending = null;
+    });
+  }
+  // 异教地图:本回合打出发现牌后,从剩余选项再抽一张
+  function pickMapLeft(idx: number) {
+    mutate((st) => {
+      const p = st.pending;
+      if (!p || p.k !== "mapPick") return;
+      const cid = p.opts[idx];
+      if (cid == null) return;
+      mapDrawLeft(st, "p", cid);
+      st.pending = null;
+    });
+  }
 
   function surrender() {
     timers.current.forEach(clearTimeout);
@@ -343,12 +376,12 @@ export default function ArcaneThrone() {
     setInspect(null);
     if (selHand !== i) {
       setSelHand(i); setSelAtk(null);
-      if (effCost(game, "p", c) > game.p.mana) setHint({ t: "法力水晶不足", id: Date.now() });
+      if (effCost(game, "p", c, en) > game.p.mana) setHint({ t: "法力水晶不足", id: Date.now() });
       else if (spTarget(c.sp) === "fm" && !game.p.board.length) setHint({ t: "场上没有可选目标", id: Date.now() });
       else if (spTarget(c.sp)) setHint({ t: "点击目标施放法术", id: Date.now() });
       return;
     }
-    if (effCost(game, "p", c) > game.p.mana) { setHint({ t: "法力水晶不足", id: Date.now() }); return; }
+    if (effCost(game, "p", c, en) > game.p.mana) { setHint({ t: "法力水晶不足", id: Date.now() }); return; }
     if (c.type === "s" && c.sp.k === "shadow") { setHint({ t: "你尚未打出过法术,无法复制", id: Date.now() }); return; }
     if (c.type === "m") {
       if (game.p.board.length >= 6) { setHint({ t: "随从区已满(最多 6 个)", id: Date.now() }); return; }
@@ -389,6 +422,31 @@ export default function ArcaneThrone() {
         moonTutor(st, "p", en2);
       });
       setSelHand(null); setHovHand(null);
+    } else if (c.sp.k === "dredge") {
+      const willDraw = !!c.sp.comboDraw && (game.p.playedThisTurn || 0) > 0; // 连击需在本牌计入前判定
+      mutate((st) => {
+        const en2 = st.p.hand[i];
+        st.p.mana -= effCost(st, "p", c);
+        st.p.hand.splice(i, 1);
+        afterSpellPlayed(st, "p", c.id);
+        log(st, `你施放了「${c.name}」`);
+        moonTutor(st, "p", en2);
+        if (st.p.deck.length) st.pending = { k: "dredge", opts: st.p.deck.slice(0, 3), draw: willDraw };
+        else if (willDraw) draw(st, "p", 1); // 牌库已空:无可探底,连击退化为直接抽(疲劳)
+      });
+      setSelHand(null); setHovHand(null);
+    } else if (c.sp.k === "map") {
+      if (!game.p.deck.length) { setHint({ t: "牌库已空,无法发现", id: Date.now() }); return; }
+      mutate((st) => {
+        const en2 = st.p.hand[i];
+        st.p.mana -= effCost(st, "p", c);
+        st.p.hand.splice(i, 1);
+        afterSpellPlayed(st, "p", c.id);
+        log(st, `你施放了「${c.name}」`);
+        moonTutor(st, "p", en2);
+        st.pending = { k: "mapDiscover", opts: sampleDeckAny(st, "p") };
+      });
+      setSelHand(null); setHovHand(null);
     } else if (!spTarget(c.sp)) {
       mutate((st) => { if (castSpell(st, "p", i, null)) log(st, `你施放了「${c.name}」`); });
       setSelHand(null); setHovHand(null);
@@ -417,6 +475,7 @@ export default function ArcaneThrone() {
     if (side === "p" && uid) {
       const m = game.p.board.find((x) => x.uid === uid);
       if (!m) return;
+      if (m.frozen) { setInspect({ side, uid }); setHint({ t: "该随从已被冻结,本回合无法攻击", id: Date.now() }); return; }
       if (m.sick && !m.rush) { setInspect({ side, uid }); setHint({ t: "刚上场的随从需等待一回合(冲锋除外)", id: Date.now() }); return; }
       if (m.attacked) { setInspect({ side, uid }); setHint({ t: "该随从本回合已攻击过", id: Date.now() }); return; }
       const next = selAtk === uid ? null : uid;
@@ -468,6 +527,7 @@ export default function ArcaneThrone() {
     base.banner = { text: "对手回合", id: Date.now() };
     log(base, "对手回合开始");
     base.fx = [];
+    thawFrozen(base, "p"); // 冻结结算:我方回合结束时解冻己方随从
     runAiTurn(base);
   }
 
@@ -488,35 +548,68 @@ export default function ArcaneThrone() {
     return (
       <div style={{ ...outer, alignItems: "center", justifyContent: "center", gap: 18, padding: 20 }}>
         <style>{CSS}</style>
-        <div style={{ fontSize: 38, fontWeight: 900, color: "#ffd700", textShadow: "0 0 22px rgba(255,200,0,.7),0 2px 4px #000", letterSpacing: 6 }}>⚔️ 奥术王座 ⚔️</div>
+        {/* 标题徽记 */}
+        <div style={{ fontSize: 56, lineHeight: 1, filter: "drop-shadow(0 0 18px rgba(255,200,0,.5))" }}>⚔️</div>
+        <div style={{ fontSize: 42, fontWeight: 900, color: "#ffd700", textShadow: "0 0 22px rgba(255,200,0,.7),0 2px 4px #000", letterSpacing: 8 }}>奥 术 王 座</div>
         <div style={{ color: "#d8c89a", fontSize: 14, letterSpacing: 3 }}>经 典 奇 幻 卡 牌 对 战</div>
-        <div style={{ maxWidth: 340, background: "rgba(0,0,0,.35)", border: "2px solid #8a6d3b", borderRadius: 14, padding: "16px 18px", color: "#e8dcc0", fontSize: 13, lineHeight: 2 }}>
-          <div style={{ color: "#ffd700", fontWeight: 800, marginBottom: 4, textAlign: "center" }}>— 对战规则 —</div>
-          ❤️ 双方英雄 30 血,先打空对方生命值者获胜<br />
-          💎 法力水晶每回合 +1(上限 10),用来支付卡牌费用<br />
-          🪙 先后手随机,后手多抽一张牌并获得「幸运币」<br />
-          🛡️ <b>嘲讽</b>:敌人必须先攻击该随从<br />
-          ⚡ <b>冲锋</b>:登场当回合即可攻击<br />
-          💨 <b>突袭</b>:登场当回合可攻击敌方随从,但不能攻击英雄<br />
-          🌙 <b>抉择</b>:打出时从多个效果中选择一项<br />
-          ⛨ <b>护甲</b>:先于生命值抵挡伤害<br />
-          🃏 牌库抽空后,每次抽牌受到递增的疲劳伤害
+
+        {/* 操作按钮列 */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 14, width: 220 }}>
+          <button onClick={start} style={{ ...goldBtn, width: "100%" }}>开 始 对 战</button>
+          <button onClick={openDeckBuilder} style={{ ...goldBtn, width: "100%", background: "rgba(0,0,0,.3)", border: "2px solid #8a6d3b", color: "#e8dcc0", boxShadow: "none" }}>
+            构 建 牌 组
+          </button>
+          <button onClick={() => setShowRules(true)} style={{ ...goldBtn, width: "100%", background: "rgba(0,0,0,.3)", border: "2px solid #8a6d3b", color: "#e8dcc0", boxShadow: "none" }}>
+            对 战 规 则
+          </button>
         </div>
-        <div style={{ maxWidth: 340, color: "#bfae84", fontSize: 12, lineHeight: 1.9, textAlign: "center" }}>
-          操作:点击手牌查看 → <b>再次点击打出</b>;指向性法术点击目标施放;<br />
-          点击我方随从,再点击敌方目标即可发起攻击。
-        </div>
-        <button onClick={start} style={goldBtn}>开 始 对 战</button>
-        <button onClick={openDeckBuilder} style={{ ...goldBtn, background: "rgba(0,0,0,.3)", border: "2px solid #8a6d3b", color: "#e8dcc0", boxShadow: "none" }}>
-          构 建 牌 组
-        </button>
-        <span style={{ fontSize: 11, color: activeDeck && !playerDeck ? "#e0a85c" : "#9c9272", textAlign: "center", maxWidth: 340 }}>
+
+        <span style={{ fontSize: 11, color: activeDeck && !playerDeck ? "#e0a85c" : "#9c9272", textAlign: "center", maxWidth: 340, marginTop: 4 }}>
           {playerDeck
             ? `⚔️ 对战将使用:${activeDeck!.name}(30 张)`
             : activeDeck
             ? `⚠️ 牌组「${activeDeck.name}」不足 30 张,对战将使用随机牌组`
             : "⚔️ 对战将使用:随机牌组"}
         </span>
+
+        {/* 对战规则弹窗 */}
+        {showRules && (
+          <div
+            onClick={() => setShowRules(false)}
+            style={{ position: "fixed", inset: 0, zIndex: 90, background: "rgba(0,0,0,.72)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{ width: "min(420px,94vw)", maxHeight: "86vh", overflowY: "auto", background: "linear-gradient(170deg,#2c3320,#1a2010)", border: "2px solid #8a6d3b", borderRadius: 16, padding: "20px 22px", boxShadow: "0 12px 40px rgba(0,0,0,.7)" }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <span style={{ color: "#ffd700", fontWeight: 900, fontSize: 18, letterSpacing: 2 }}>📜 对战规则</span>
+                <button
+                  onClick={() => setShowRules(false)}
+                  style={{ width: 30, height: 30, borderRadius: "50%", border: "1px solid #8a6d3b", background: "rgba(0,0,0,.35)", color: "#e8dcc0", fontSize: 16, fontWeight: 900, cursor: "pointer", fontFamily: "inherit", lineHeight: 1 }}
+                >
+                  ✕
+                </button>
+              </div>
+              <div style={{ color: "#e8dcc0", fontSize: 13, lineHeight: 2 }}>
+                ❤️ 双方英雄 30 血,先打空对方生命值者获胜<br />
+                💎 法力水晶每回合 +1(上限 10),用来支付卡牌费用<br />
+                🪙 先后手随机,后手多抽一张牌并获得「幸运币」<br />
+                🛡️ <b>嘲讽</b>:敌人必须先攻击该随从<br />
+                ⚡ <b>冲锋</b>:登场当回合即可攻击<br />
+                💨 <b>突袭</b>:登场当回合可攻击敌方随从,但不能攻击英雄<br />
+                🌙 <b>抉择</b>:打出时从多个效果中选择一项<br />
+                ❄️ <b>冻结</b>:被冻结的随从下个回合无法攻击,之后解除<br />
+                ⛨ <b>护甲</b>:先于生命值抵挡伤害<br />
+                🃏 牌库抽空后,每次抽牌受到递增的疲劳伤害
+              </div>
+              <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid rgba(138,109,59,.5)", color: "#bfae84", fontSize: 12, lineHeight: 1.9 }}>
+                <div style={{ color: "#ffd700", fontWeight: 800, marginBottom: 4 }}>— 操作 —</div>
+                点击手牌查看 → <b>再次点击打出</b>;指向性法术点击目标施放;点击我方随从,再点击敌方目标即可发起攻击。
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -583,9 +676,9 @@ export default function ArcaneThrone() {
                     <div
                       key={c.id}
                       onClick={() => addCard(c.id)}
-                      style={{ position: "relative", height: 152, boxSizing: "border-box", display: "flex", flexDirection: "column", alignItems: "center", borderRadius: 10, padding: "12px 8px 14px", cursor: addable ? "pointer" : "default", textAlign: "center", background: c.type === "m" ? "linear-gradient(170deg,#7a5c33,#4a3517)" : "linear-gradient(170deg,#3d4f8a,#23284e)", border: n ? "2px solid #ffd700" : "2px solid " + (c.type === "m" ? "#caa45c" : "#7d90d8"), boxShadow: n ? "0 0 10px rgba(255,215,0,.3)" : "0 2px 5px rgba(0,0,0,.4)", opacity: addable || n ? 1 : 0.55 }}
+                      style={{ position: "relative", minHeight: 152, boxSizing: "border-box", display: "flex", flexDirection: "column", alignItems: "center", borderRadius: 10, padding: "12px 8px 14px", cursor: addable ? "pointer" : "default", textAlign: "center", background: c.type === "m" ? "linear-gradient(170deg,#7a5c33,#4a3517)" : "linear-gradient(170deg,#3d4f8a,#23284e)", border: n ? "2px solid #ffd700" : "2px solid " + (c.type === "m" ? "#caa45c" : "#7d90d8"), boxShadow: n ? "0 0 10px rgba(255,215,0,.3)" : "0 2px 5px rgba(0,0,0,.4)", opacity: addable || n ? 1 : 0.55 }}
                     >
-                      <span style={{ position: "absolute", top: -7, left: -7, width: 22, height: 22, borderRadius: "50%", background: "radial-gradient(circle at 35% 30%,#9fd6ff,#1f63c4 60%,#0b3a7e)", border: "2px solid #cfe6ff", color: "#fff", fontSize: 12, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <span style={{ position: "absolute", top: -9, left: -9, width: 28, height: 28, borderRadius: "50%", background: "radial-gradient(circle at 35% 30%,#9fd6ff,#1f63c4 60%,#0b3a7e)", border: "2px solid #cfe6ff", color: "#fff", fontSize: 15, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center" }}>
                         {c.cost}
                       </span>
                       {n > 0 && (
@@ -602,11 +695,11 @@ export default function ArcaneThrone() {
                       <div style={{ fontSize: 26 }}>{c.emoji}</div>
                       <div style={{ color: c.rarity === "c" ? "#ffe9b0" : RARITY[c.rarity].color, fontWeight: 800, fontSize: 13, textShadow: "0 1px 2px #000" }}>{c.name}</div>
                       <div style={{ color: RARITY[c.rarity].color, fontSize: 10, fontWeight: 800 }}>◆ {RARITY[c.rarity].label}</div>
-                      <div style={{ color: "#d8cdb2", fontSize: 10, marginTop: 3, lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{kw(c)}{c.desc}</div>
+                      <div style={{ color: "#d8cdb2", fontSize: 10, marginTop: 3, lineHeight: 1.4 }}>{kw(c)}{c.desc}</div>
                       {c.type === "m" && (
                         <>
-                          <Badge pos="bl" v={c.atk!} bg="#b8860b" />
-                          <Badge pos="br" v={c.hp!} bg="#7f1d1d" />
+                          <Badge pos="bl" v={c.atk!} bg="#b8860b" size={34} />
+                          <Badge pos="br" v={c.hp!} bg="#7f1d1d" size={34} />
                         </>
                       )}
                     </div>
@@ -837,8 +930,8 @@ export default function ArcaneThrone() {
   // 是否还有可行动项(可打出的牌或可攻击的随从):用于"结束回合"按钮的状态提示
   const canAct =
     myTurn &&
-    (game.p.hand.some((en) => effCost(game, "p", effCard(game, "p", en)) <= game.p.mana) ||
-      game.p.board.some((m) => !m.attacked && (!m.sick || m.rush)));
+    (game.p.hand.some((en) => effCost(game, "p", effCard(game, "p", en), en) <= game.p.mana) ||
+      game.p.board.some((m) => !m.attacked && !m.frozen && (!m.sick || m.rush)));
 
   // ---------- 对战界面 ----------
   return (
@@ -846,57 +939,57 @@ export default function ArcaneThrone() {
       <style>{CSS}</style>
 
       {/* 顶栏:敌方 */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 10px", background: "linear-gradient(180deg,#523c20,#3a2a14)", borderBottom: "2px solid #8a6d3b", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 14px", background: "linear-gradient(180deg,#523c20,#3a2a14)", borderBottom: "2px solid #8a6d3b", gap: 8 }}>
         <HeroEl side="a" h={game.a} isT={isT} clickEntity={clickEntity} floats={floats} />
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
           <div style={{ display: "flex" }}>
             {Array.from({ length: Math.min(game.a.hand.length, HAND_LIMIT) }).map((_, i) => (
-              <div key={i} style={{ width: 18, height: 26, marginLeft: i ? -7 : 0, borderRadius: 3, background: "linear-gradient(160deg,#5b3fa0,#2c1d52)", border: "1px solid #9d86d9" }} />
+              <div key={i} style={{ width: 24, height: 34, marginLeft: i ? -9 : 0, borderRadius: 4, background: "linear-gradient(160deg,#5b3fa0,#2c1d52)", border: "1px solid #9d86d9" }} />
             ))}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ color: "#7cc4ff", fontWeight: 800, fontSize: 13 }}>{game.a.mana}/{game.a.maxMana}</span>
+            <span style={{ color: "#7cc4ff", fontWeight: 800, fontSize: 16 }}>{game.a.mana}/{game.a.maxMana}</span>
             <div style={{ display: "flex", gap: 2 }}>
               {Array.from({ length: game.a.maxMana }).map((_, i) => (
-                <span key={i} style={{ width: 11, height: 11, borderRadius: "50%", background: i < game.a.mana ? "radial-gradient(circle at 35% 30%,#9fd6ff,#1d6fd1 65%,#0c3e85)" : "#16314f", border: "1px solid #5c83ad", boxShadow: i < game.a.mana ? "0 0 5px #4da3ff" : "none" }} />
+                <span key={i} style={{ width: 14, height: 14, borderRadius: "50%", background: i < game.a.mana ? "radial-gradient(circle at 35% 30%,#9fd6ff,#1d6fd1 65%,#0c3e85)" : "#16314f", border: "1px solid #5c83ad", boxShadow: i < game.a.mana ? "0 0 5px #4da3ff" : "none" }} />
               ))}
             </div>
           </div>
-          <span style={{ fontSize: 11, color: "#cdbf9a" }}>手牌 {game.a.hand.length} · 牌库 {game.a.deck.length}</span>
+          <span style={{ fontSize: 14, color: "#cdbf9a" }}>手牌 {game.a.hand.length} · 牌库 {game.a.deck.length}</span>
         </div>
       </div>
 
       {/* 战场 */}
-      <div onClick={() => { setSelHand(null); setSelAtk(null); setInspect(null); setHovHand(null); setShowLog(false); }} style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-evenly", padding: "4px 4px", minHeight: 230 }}>
-        <div style={{ display: "flex", justifyContent: "center", gap: 12, minHeight: 88, alignItems: "center", overflowX: "auto", padding: "10px 4px" }}>
-          {game.a.board.length ? game.a.board.map((m) => <MinionEl key={m.uid} side="a" m={m} myTurn={myTurn} selAtk={selAtk} isT={isT} clickEntity={clickEntity} floats={floats} />) : <span style={{ color: "rgba(230,220,180,.25)", fontSize: 11, letterSpacing: 3 }}>— 敌 方 空 场 —</span>}
+      <div onClick={() => { setSelHand(null); setSelAtk(null); setInspect(null); setHovHand(null); setShowLog(false); }} style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-evenly", padding: "6px 4px", minHeight: 290 }}>
+        <div style={{ display: "flex", justifyContent: "center", gap: 16, minHeight: 112, alignItems: "center", overflowX: "auto", padding: "12px 4px" }}>
+          {game.a.board.length ? game.a.board.map((m) => <MinionEl key={m.uid} side="a" m={m} myTurn={myTurn} selAtk={selAtk} isT={isT} clickEntity={clickEntity} floats={floats} />) : <span style={{ color: "rgba(230,220,180,.25)", fontSize: 14, letterSpacing: 3 }}>— 敌 方 空 场 —</span>}
         </div>
 
         {/* 中线 */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 8px" }}>
-          <span style={{ fontSize: 10, color: "#bfae84", whiteSpace: "nowrap" }}>回合 {Math.max(1, game.turnNum)}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "2px 8px" }}>
+          <span style={{ fontSize: 13, color: "#bfae84", whiteSpace: "nowrap" }}>回合 {Math.max(1, game.turnNum)}</span>
           <button
             onClick={(e) => { e.stopPropagation(); setShowLog((v) => !v); }}
             title="战斗记录"
-            style={{ background: showLog ? "rgba(255,215,0,.18)" : "none", border: "1px solid #8a6d3b", borderRadius: 6, color: "#d8c89a", fontSize: 11, cursor: "pointer", padding: "2px 6px", fontFamily: "inherit", lineHeight: 1.4 }}
+            style={{ background: showLog ? "rgba(255,215,0,.18)" : "none", border: "1px solid #8a6d3b", borderRadius: 7, color: "#d8c89a", fontSize: 14, cursor: "pointer", padding: "4px 9px", fontFamily: "inherit", lineHeight: 1.4 }}
           >
             📜
           </button>
           <button
             onClick={(e) => { e.stopPropagation(); if (!game.winner) setConfirmSurrender(true); }}
             title="认输"
-            style={{ background: "none", border: "1px solid #8a6d3b", borderRadius: 6, color: "#d8c89a", fontSize: 11, cursor: "pointer", padding: "2px 6px", fontFamily: "inherit", lineHeight: 1.4 }}
+            style={{ background: "none", border: "1px solid #8a6d3b", borderRadius: 7, color: "#d8c89a", fontSize: 14, cursor: "pointer", padding: "4px 9px", fontFamily: "inherit", lineHeight: 1.4 }}
           >
             🏳️
           </button>
-          <span style={{ flex: 1, fontSize: 12, color: hint ? "#ffd966" : "#d8c89a", fontStyle: "italic", textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <span style={{ flex: 1, fontSize: 15, color: hint ? "#ffd966" : "#d8c89a", fontStyle: "italic", textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {hint ? hint.t : game.lastLog}
           </span>
           {myTurn ? (
             // 无可行动项时变绿发光提示"可以结束了",仍有行动项时保持普通金色
             <button
               onClick={endTurn}
-              style={{ padding: "7px 13px", borderRadius: 999, fontWeight: 800, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap", fontFamily: "inherit",
+              style={{ padding: "10px 18px", borderRadius: 999, fontWeight: 800, fontSize: 16, cursor: "pointer", whiteSpace: "nowrap", fontFamily: "inherit",
                 border: "2px solid " + (canAct ? "#f0d98c" : "#9be29b"),
                 background: canAct ? "linear-gradient(180deg,#ffe08a,#c79a2e)" : "linear-gradient(180deg,#7bd87b,#2f9e46)",
                 color: canAct ? "#4a3508" : "#0d3318",
@@ -909,7 +1002,7 @@ export default function ArcaneThrone() {
             <button
               onClick={skipAi}
               disabled={!aiBusy}
-              style={{ padding: "7px 13px", borderRadius: 999, fontWeight: 800, fontSize: 12, cursor: aiBusy ? "pointer" : "default", whiteSpace: "nowrap", fontFamily: "inherit",
+              style={{ padding: "10px 18px", borderRadius: 999, fontWeight: 800, fontSize: 16, cursor: aiBusy ? "pointer" : "default", whiteSpace: "nowrap", fontFamily: "inherit",
                 border: "2px solid " + (aiBusy ? "#c9a85a" : "#6b6452"),
                 background: aiBusy ? "rgba(0,0,0,.35)" : "#4d4738",
                 color: aiBusy ? "#f4e6c1" : "#9a937e", boxShadow: "none" }}
@@ -919,8 +1012,8 @@ export default function ArcaneThrone() {
           )}
         </div>
 
-        <div style={{ display: "flex", justifyContent: "center", gap: 12, minHeight: 88, alignItems: "center", overflowX: "auto", padding: "10px 4px" }}>
-          {game.p.board.length ? game.p.board.map((m) => <MinionEl key={m.uid} side="p" m={m} myTurn={myTurn} selAtk={selAtk} isT={isT} clickEntity={clickEntity} floats={floats} />) : <span style={{ color: "rgba(230,220,180,.25)", fontSize: 11, letterSpacing: 3 }}>— 我 方 空 场 —</span>}
+        <div style={{ display: "flex", justifyContent: "center", gap: 16, minHeight: 112, alignItems: "center", overflowX: "auto", padding: "12px 4px" }}>
+          {game.p.board.length ? game.p.board.map((m) => <MinionEl key={m.uid} side="p" m={m} myTurn={myTurn} selAtk={selAtk} isT={isT} clickEntity={clickEntity} floats={floats} />) : <span style={{ color: "rgba(230,220,180,.25)", fontSize: 14, letterSpacing: 3 }}>— 我 方 空 场 —</span>}
         </div>
       </div>
 
@@ -957,6 +1050,7 @@ export default function ArcaneThrone() {
             {inspectM.atk} 攻 / {inspectM.hp}{inspectM.hp < inspectM.maxHp ? `/${inspectM.maxHp}` : ""} 血
           </div>
           <div style={{ color: "#e8dcc0", fontSize: 12, marginTop: 3, lineHeight: 1.45 }}>
+            {inspectM.frozen && <span style={{ color: "#bfe9ff", fontWeight: 700 }}>❄️ 已冻结 </span>}
             {kw(inspectM)}{byId[inspectM.cid] ? byId[inspectM.cid].desc : ""}
           </div>
           <div style={{ color: inspect.side === "p" ? "#c9a85a" : "#cf9aef", fontSize: 11, marginTop: 5, fontStyle: "italic" }}>
@@ -984,27 +1078,27 @@ export default function ArcaneThrone() {
       })()}
 
       {/* 手牌 */}
-      <div onMouseLeave={() => setHovHand(null)} style={{ display: "flex", justifyContent: "center", alignItems: "flex-end", padding: "18px 6px 8px", minHeight: 108 }}>
+      <div onMouseLeave={() => setHovHand(null)} style={{ display: "flex", justifyContent: "center", alignItems: "flex-end", padding: "22px 6px 10px", minHeight: 142 }}>
         {game.p.hand.length ? game.p.hand.map((en, i) => {
           const ec = effCard(game, "p", en); // 殒命暗影:手牌中即显示为上一张法术
           const transformed = byId[en.cid].sp?.k === "shadow" && ec.sp?.k !== "shadow";
-          return <HandCard key={en.uid} c={ec} transformed={transformed} i={i} selHand={selHand} mana={game.p.mana} myTurn={myTurn} handleHand={handleHand} setHovHand={setHovHand} cost={effCost(game, "p", ec)} bonus={game.p.spellDmg || 0} />;
-        }) : <span style={{ color: "#8a8468", fontSize: 12 }}>(手牌为空)</span>}
+          return <HandCard key={en.uid} c={ec} transformed={transformed} i={i} selHand={selHand} mana={game.p.mana} myTurn={myTurn} handleHand={handleHand} setHovHand={setHovHand} cost={effCost(game, "p", ec, en)} bonus={game.p.spellDmg || 0} />;
+        }) : <span style={{ color: "#8a8468", fontSize: 15 }}>(手牌为空)</span>}
       </div>
 
       {/* 底栏:我方 */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 10px", background: "linear-gradient(0deg,#523c20,#3a2a14)", borderTop: "2px solid #8a6d3b", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 14px", background: "linear-gradient(0deg,#523c20,#3a2a14)", borderTop: "2px solid #8a6d3b", gap: 8 }}>
         <HeroEl side="p" h={game.p} isT={isT} clickEntity={clickEntity} floats={floats} />
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ color: "#7cc4ff", fontWeight: 800, fontSize: 13 }}>{game.p.mana}/{game.p.maxMana}</span>
+            <span style={{ color: "#7cc4ff", fontWeight: 800, fontSize: 16 }}>{game.p.mana}/{game.p.maxMana}</span>
             <div style={{ display: "flex", gap: 2 }}>
               {Array.from({ length: game.p.maxMana }).map((_, i) => (
-                <span key={i} style={{ width: 11, height: 11, borderRadius: "50%", background: i < game.p.mana ? "radial-gradient(circle at 35% 30%,#9fd6ff,#1d6fd1 65%,#0c3e85)" : "#16314f", border: "1px solid #5c83ad", boxShadow: i < game.p.mana ? "0 0 5px #4da3ff" : "none" }} />
+                <span key={i} style={{ width: 14, height: 14, borderRadius: "50%", background: i < game.p.mana ? "radial-gradient(circle at 35% 30%,#9fd6ff,#1d6fd1 65%,#0c3e85)" : "#16314f", border: "1px solid #5c83ad", boxShadow: i < game.p.mana ? "0 0 5px #4da3ff" : "none" }} />
               ))}
             </div>
           </div>
-          <span style={{ fontSize: 11, color: "#cdbf9a" }}>牌库 {game.p.deck.length}</span>
+          <span style={{ fontSize: 14, color: "#cdbf9a" }}>牌库 {game.p.deck.length}</span>
         </div>
       </div>
 
@@ -1048,6 +1142,12 @@ export default function ArcaneThrone() {
               ? `${pending.emoji} ${pending.name} — 抉择`
               : pending.k === "moonPick"
               ? "🌙 月光指引 — 发现一张牌,获得其复制"
+              : pending.k === "dredge"
+              ? `🎣 探底 — 选一张置于牌库顶${pending.draw ? "并抽取(连击)" : ""}`
+              : pending.k === "mapDiscover"
+              ? "🗺️ 异教地图 — 发现一张牌并抽取"
+              : pending.k === "mapPick"
+              ? "🗺️ 异教地图 — 从剩余选项再抽一张"
               : `🌺 夜影花蕾 — ${pending.mode === "m" ? "选择一个随从召唤" : "选择一个法术施放"}`}
           </div>
           <div style={{ display: "flex", gap: 14, flexWrap: "wrap", justifyContent: "center" }}>
@@ -1071,10 +1171,15 @@ export default function ArcaneThrone() {
                   </div>
                 ));
               })()}
-            {(pending.k === "bloomPick" || pending.k === "moonPick") &&
+            {(pending.k === "bloomPick" || pending.k === "moonPick" || pending.k === "dredge" || pending.k === "mapDiscover" || pending.k === "mapPick") &&
               pending.opts.map((cid, idx) => {
                 const c = byId[cid];
-                const pick = pending.k === "moonPick" ? pickMoon : pickBloomCard;
+                const pick =
+                  pending.k === "moonPick" ? pickMoon
+                  : pending.k === "bloomPick" ? pickBloomCard
+                  : pending.k === "dredge" ? pickDredge
+                  : pending.k === "mapDiscover" ? pickMapDiscover
+                  : pickMapLeft;
                 return (
                   <div
                     key={idx}
