@@ -31,7 +31,6 @@ export default function ArcaneThrone() {
   const [selHeroAtk, setSelHeroAtk] = useState(false); // 已选中我方英雄作为攻击者
   const [hint, setHint] = useState<{ t: string; id: number } | null>(null);
   const [hovHand, setHovHand] = useState<number | null>(null);
-  const [inspect, setInspect] = useState<{ side: Side; uid: number } | null>(null);
   const [showLog, setShowLog] = useState(false);
   const [showRules, setShowRules] = useState(false); // 主菜单「对战规则」弹窗
   const [confirmSurrender, setConfirmSurrender] = useState(false);
@@ -137,7 +136,7 @@ export default function ArcaneThrone() {
     timers.current.forEach(clearTimeout);
     timers.current = [];
     setSelHand(null); setSelAtk(null); setSelHeroAtk(false); setHint(null);
-    setHovHand(null); setInspect(null); setShowLog(false);
+    setHovHand(null); setShowLog(false);
     setConfirmSurrender(false);
     setShowStartOpts(false); setAiPick(false);
     lastAi.current = ai ?? null;
@@ -407,7 +406,7 @@ export default function ArcaneThrone() {
     timers.current.forEach(clearTimeout);
     timers.current = [];
     setConfirmSurrender(false);
-    setSelHand(null); setSelAtk(null); setSelHeroAtk(false); setInspect(null); setHovHand(null);
+    setSelHand(null); setSelAtk(null); setSelHeroAtk(false); setHovHand(null);
     mutate((st) => {
       if (st.winner || st.phase !== "play") return;
       st.winner = "a";
@@ -418,12 +417,11 @@ export default function ArcaneThrone() {
 
   function handleHand(i: number) {
     if (game.phase !== "play" || game.pending) return;
-    // AI 回合:手牌只读,点击切换该牌的预览(再次点击关闭)
-    if (!myTurn) { setHovHand((h) => (h === i ? null : i)); return; }
+    // AI 回合:手牌只读,详情仅靠悬停查看(点击不再弹窗)
+    if (!myTurn) return;
     const en = game.p.hand[i];
     if (!en) return;
     const c = effCard(game, "p", en); // 殒命暗影:解析为上一张打出的法术
-    setInspect(null);
     if (selHand !== i) {
       setSelHand(i); setSelAtk(null);
       if (effCost(game, "p", c, en) > game.p.mana) setHint({ t: "法力水晶不足", id: Date.now() });
@@ -508,10 +506,7 @@ export default function ArcaneThrone() {
 
   function clickEntity(side: Side, uid: number | null) {
     if (game.phase !== "play" || game.pending) return;
-    if (!myTurn) {
-      if (uid) setInspect({ side, uid });
-      return;
-    }
+    if (!myTurn) return;
     const selCard = selHand != null && game.p.hand[selHand] ? effCard(game, "p", game.p.hand[selHand]) : null;
     if (selCard && spTarget(selCard.sp) && effCost(game, "p", selCard) <= game.p.mana) {
       if (spTarget(selCard.sp) === "fm" && (side !== "p" || !uid)) return;
@@ -522,17 +517,17 @@ export default function ArcaneThrone() {
           log(st, `你施放了「${name}」`);
         }
       });
-      setSelHand(null); setInspect(null);
+      setSelHand(null);
       return;
     }
     if (side === "p" && uid) {
       const m = game.p.board.find((x) => x.uid === uid);
       if (!m) return;
-      if (m.frozen) { setInspect({ side, uid }); setHint({ t: "该随从已被冻结,本回合无法攻击", id: Date.now() }); return; }
-      if (m.sick && !m.rush) { setInspect({ side, uid }); setHint({ t: "刚上场的随从需等待一回合(冲锋除外)", id: Date.now() }); return; }
-      if (m.attacked) { setInspect({ side, uid }); setHint({ t: "该随从本回合已攻击过", id: Date.now() }); return; }
+      if (m.frozen) { setHint({ t: "该随从已被冻结,本回合无法攻击", id: Date.now() }); return; }
+      if (m.sick && !m.rush) { setHint({ t: "刚上场的随从需等待一回合(冲锋除外)", id: Date.now() }); return; }
+      if (m.attacked) { setHint({ t: "该随从本回合已攻击过", id: Date.now() }); return; }
       const next = selAtk === uid ? null : uid;
-      setSelAtk(next); setSelHeroAtk(false); setSelHand(null); setInspect(null);
+      setSelAtk(next); setSelHeroAtk(false); setSelHand(null);
       if (next) setHint({ t: "点击敌方随从或英雄发起攻击", id: Date.now() });
       return;
     }
@@ -541,12 +536,8 @@ export default function ArcaneThrone() {
       if (heroAtkVal(game.p) <= 0) { setHint({ t: "英雄没有攻击力(可装备武器或使用英雄技能)", id: Date.now() }); return; }
       if (game.p.heroAttacked) { setHint({ t: "英雄本回合已攻击过", id: Date.now() }); return; }
       const next = !selHeroAtk;
-      setSelHeroAtk(next); setSelAtk(null); setSelHand(null); setInspect(null);
+      setSelHeroAtk(next); setSelAtk(null); setSelHand(null);
       if (next) setHint({ t: "点击敌方随从或英雄发起攻击", id: Date.now() });
-      return;
-    }
-    if (side === "a" && !selAtk && !selHeroAtk && uid) {
-      setInspect({ side, uid }); setSelHand(null);
       return;
     }
     if (side === "a" && (selAtk || selHeroAtk)) {
@@ -590,13 +581,13 @@ export default function ArcaneThrone() {
     if (!myTurn || game.pending) return;
     if (game.p.heroPowerUsed) { setHint({ t: "本回合已使用过英雄技能", id: Date.now() }); return; }
     if (game.p.mana < HERO_POWER_COST) { setHint({ t: "法力水晶不足", id: Date.now() }); return; }
-    setSelHand(null); setSelAtk(null); setSelHeroAtk(false); setInspect(null);
+    setSelHand(null); setSelAtk(null); setSelHeroAtk(false);
     mutate((st) => { useHeroPower(st, "p"); });
   }
 
   function endTurn() {
     if (!myTurn || game.pending) return;
-    setSelHand(null); setSelAtk(null); setSelHeroAtk(false); setInspect(null); setHovHand(null);
+    setSelHand(null); setSelAtk(null); setSelHeroAtk(false); setHovHand(null);
     const cur = gameRef.current;
     if (cur.phase !== "play") return;
     const base = clone(cur);
@@ -1115,8 +1106,7 @@ export default function ArcaneThrone() {
 
   const selCard = selHand != null && game.p.hand[selHand] ? effCard(game, "p", game.p.hand[selHand]) : null;
   const hovCard = hovHand != null && game.p.hand[hovHand] ? effCard(game, "p", game.p.hand[hovHand]) : null;
-  const previewCard = hovCard || selCard;
-  const inspectM = !previewCard && inspect ? game[inspect.side].board.find((m) => m.uid === inspect.uid) : null;
+  const previewCard = hovCard; // 仅悬停手牌弹详情;选中/点击不再弹窗
   const selTargetKind = selCard ? spTarget(selCard.sp) : undefined;
   const spellTargeting = !!(selCard && selTargetKind && effCost(game, "p", selCard) <= game.p.mana);
   const enemyTaunts = game.a.board.filter((m) => m.taunt);
@@ -1175,7 +1165,7 @@ export default function ArcaneThrone() {
       </div>
 
       {/* 战场 */}
-      <div onClick={() => { setSelHand(null); setSelAtk(null); setSelHeroAtk(false); setInspect(null); setHovHand(null); setShowLog(false); }} style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-evenly", padding: "6px 4px", minHeight: 290 }}>
+      <div onClick={() => { setSelHand(null); setSelAtk(null); setSelHeroAtk(false); setHovHand(null); setShowLog(false); }} style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-evenly", padding: "6px 4px", minHeight: 290 }}>
         <div style={{ display: "flex", justifyContent: "center", gap: 16, minHeight: 112, alignItems: "center", overflowX: "auto", padding: "12px 4px" }}>
           {game.a.board.length ? game.a.board.map((m) => <MinionEl key={m.uid} side="a" m={m} myTurn={myTurn} selAtk={selAtk} isT={isT} clickEntity={clickEntity} floats={floats} />) : <span style={{ color: "rgba(230,220,180,.25)", fontSize: 14, letterSpacing: 3 }}>— 敌 方 空 场 —</span>}
         </div>
@@ -1232,10 +1222,9 @@ export default function ArcaneThrone() {
         </div>
       </div>
 
-      {/* 卡牌 / 随从详情预览(选中、悬停或点击查看) */}
+      {/* 手牌详情预览:仅悬停手牌时在右侧中部显示(点击不再弹窗) */}
       {previewCard && (
-        // 悬停手牌:在右侧中部显示详情;选目标时(攻击 / 指向性法术)改靠左下角并半透明,避免遮挡居中的随从区
-        <div style={{ position: "absolute", ...(hovCard ? { right: 200, top: "40%" } : { bottom: 138, left: 8 }), zIndex: 70, pointerEvents: "none", width: 156, borderRadius: 12, padding: "10px 8px", background: previewCard.type === "m" ? "linear-gradient(170deg,#7a5c33,#3c2b12)" : "linear-gradient(170deg,#3d4f8a,#1d2244)", border: "2px solid #ffd700", boxShadow: "0 8px 24px rgba(0,0,0,.7)", textAlign: "center", opacity: !hovCard && (selAtk != null || selHeroAtk || spellTargeting) ? 0.55 : 1, transition: "opacity .15s" }}>
+        <div style={{ position: "absolute", right: 200, top: "40%", zIndex: 70, pointerEvents: "none", width: 156, borderRadius: 12, padding: "10px 8px", background: previewCard.type === "m" ? "linear-gradient(170deg,#7a5c33,#3c2b12)" : "linear-gradient(170deg,#3d4f8a,#1d2244)", border: "2px solid #ffd700", boxShadow: "0 8px 24px rgba(0,0,0,.7)", textAlign: "center", transition: "opacity .15s" }}>
           <div style={{ fontSize: 34 }}>{previewCard.emoji}</div>
           <div style={{ color: previewCard.rarity === "c" ? "#ffe9b0" : RARITY[previewCard.rarity].color, fontWeight: 800, fontSize: 14, textShadow: "0 1px 2px #000" }}>{previewCard.name}</div>
           <div style={{ color: RARITY[previewCard.rarity].color, fontSize: 11, fontWeight: 800 }}>◆ {RARITY[previewCard.rarity].label}</div>
@@ -1246,30 +1235,11 @@ export default function ArcaneThrone() {
             {kw(previewCard)}{cardDesc(previewCard, game.p.spellDmg || 0)}
           </div>
           <div style={{ color: "#ffd700", fontSize: 11, marginTop: 5, fontStyle: "italic" }}>
-            {previewCard !== selCard
+            {hovHand !== selHand
               ? "点击卡牌选中"
               : previewCard.type === "m" || !spTarget(previewCard.sp)
               ? "再次点击卡牌打出"
               : "点击目标施放"}
-          </div>
-        </div>
-      )}
-      {inspectM && inspect && (
-        <div style={{ position: "absolute", bottom: 138, left: 8, zIndex: 70, pointerEvents: "none", width: 156, borderRadius: 12, padding: "10px 8px", background: inspect.side === "p" ? "linear-gradient(170deg,#7a5c33,#3c2b12)" : "linear-gradient(170deg,#4a3354,#241a2c)", border: "2px solid " + (inspect.side === "p" ? "#c9a85a" : "#a06bc4"), boxShadow: "0 8px 24px rgba(0,0,0,.7)", textAlign: "center", opacity: selAtk != null || selHeroAtk || spellTargeting ? 0.55 : 1, transition: "opacity .15s" }}>
-          <div style={{ fontSize: 34 }}>{inspectM.emoji}</div>
-          <div style={{ color: byId[inspectM.cid] && byId[inspectM.cid].rarity !== "c" ? RARITY[byId[inspectM.cid].rarity].color : "#ffe9b0", fontWeight: 800, fontSize: 14, textShadow: "0 1px 2px #000" }}>{inspectM.name}</div>
-          {byId[inspectM.cid] && (
-            <div style={{ color: RARITY[byId[inspectM.cid].rarity].color, fontSize: 11, fontWeight: 800 }}>◆ {RARITY[byId[inspectM.cid].rarity].label}</div>
-          )}
-          <div style={{ color: "#9fd6ff", fontSize: 12, fontWeight: 700 }}>
-            {inspectM.atk} 攻 / {inspectM.hp}{inspectM.hp < inspectM.maxHp ? `/${inspectM.maxHp}` : ""} 血
-          </div>
-          <div style={{ color: "#e8dcc0", fontSize: 12, marginTop: 3, lineHeight: 1.45 }}>
-            {inspectM.frozen && <span style={{ color: "#bfe9ff", fontWeight: 700 }}>❄️ 已冻结 </span>}
-            {kw(inspectM)}{byId[inspectM.cid] ? byId[inspectM.cid].desc : ""}
-          </div>
-          <div style={{ color: inspect.side === "p" ? "#c9a85a" : "#cf9aef", fontSize: 11, marginTop: 5, fontStyle: "italic" }}>
-            {inspect.side === "p" ? "我方随从" : "敌方随从"} · 点击空白处关闭
           </div>
         </div>
       )}

@@ -8,7 +8,7 @@ import {
   equipWeapon, playWeapon, resolveHeroAttack, useHeroPower, heroAtkVal,
 } from "./engine";
 import { byId, DAGGER } from "./cards";
-import { computeAiTurn } from "./ai";
+import { aiPlay, computeAiTurn } from "./ai";
 
 // ---------- 构造最小 state 的辅助 ----------
 const side = (over: Partial<SideState> = {}): SideState => ({
@@ -545,5 +545,72 @@ describe("英雄技能", () => {
   it("法力不足时无法使用英雄技能", () => {
     const st = mkState({ p: side({ classId: "druid", mana: 1 }) });
     expect(useHeroPower(st, "p")).toBe(false);
+  });
+});
+
+describe("AI 战斗逻辑改进", () => {
+  it("综合斩杀:随从攻击 + 烧脸法术合并击杀(单独都不致命)", () => {
+    // 玩家 16 血(>15,避开残局烧脸分支),AI 场上 10 攻随从 + 手里火球(6 伤),10<16 且 6<16,合计 16 斩杀
+    const base = mkState({
+      p: side({ hp: 16, board: [], deck: [] }),
+      a: side({ hp: 30, maxMana: 9, mana: 9, deck: [], hand: [{ uid: 1, cid: 25 }], board: [minion({ uid: 10, atk: 10, hp: 1, sick: false })] }),
+    });
+    const snaps = computeAiTurn(base);
+    expect(snaps[snaps.length - 1].winner).toBe("a");
+  });
+
+  it("综合斩杀:用烧脸先清掉嘲讽,再随从打脸", () => {
+    // 玩家 16 血 + 5 血嘲讽;AI 火球(6)清嘲讽,16 攻随从打脸
+    const base = mkState({
+      p: side({ hp: 16, deck: [], board: [minion({ uid: 1, atk: 2, hp: 5, taunt: true })] }),
+      a: side({ hp: 30, maxMana: 9, mana: 9, deck: [], hand: [{ uid: 1, cid: 25 }], board: [minion({ uid: 10, atk: 16, hp: 1, sick: false })] }),
+    });
+    const snaps = computeAiTurn(base);
+    expect(snaps[snaps.length - 1].winner).toBe("a");
+  });
+
+  it("幸运币:多 1 费能多打出牌时才使用", () => {
+    // 1 法力 + 币 + 2 费随从:打币解锁随从
+    const st = mkState({ a: side({ mana: 1, maxMana: 1, deck: [], hand: [{ uid: 1, cid: 99 }, { uid: 2, cid: 4 }], board: [] }) });
+    expect(aiPlay(st)).toBe(true);
+    expect(st.a.mana).toBe(2);
+    expect(st.a.hand.some((e) => e.cid === 4)).toBe(true); // 随从仍待打出
+    expect(st.a.hand.some((e) => byId[e.cid].sp?.k === "coin")).toBe(false); // 币已用掉
+  });
+
+  it("幸运币:解锁的牌仍打不出时不浪费(留币)", () => {
+    // 满场 + 已用英雄技能:打币也没有可行动作,不应空过把币打掉
+    const fullBoard = [10, 11, 12, 13, 14, 15].map((uid) => minion({ uid }));
+    const st = mkState({ a: side({ mana: 1, maxMana: 1, heroPowerUsed: true, deck: [], hand: [{ uid: 1, cid: 99 }, { uid: 2, cid: 4 }], board: fullBoard }) });
+    expect(aiPlay(st)).toBe(false);
+    expect(st.a.hand.some((e) => byId[e.cid].sp?.k === "coin")).toBe(true); // 币仍在手
+  });
+
+  it("街舞起跳:不回收本回合能攻击的随从", () => {
+    const st = mkState({ a: side({ mana: 5, heroPowerUsed: true, deck: [], hand: [{ uid: 1, cid: 41 }], board: [minion({ uid: 10, atk: 5, hp: 5, sick: false })] }) });
+    expect(aiPlay(st)).toBe(false); // 无召唤失调随从可回收,街舞不打
+    expect(st.a.board[0].uid).toBe(10); // 能动随从保留在场
+    expect(st.a.hand.some((e) => e.cid === 41)).toBe(true);
+  });
+
+  it("街舞起跳:回收召唤失调随从,换成可突袭的舞者", () => {
+    const st = mkState({ a: side({ mana: 5, heroPowerUsed: true, deck: [], hand: [{ uid: 1, cid: 41 }], board: [minion({ uid: 10, cid: 4, atk: 3, hp: 2, sick: true })] }) });
+    expect(aiPlay(st)).toBe(true);
+    expect(st.a.hand.some((e) => e.cid === 4)).toBe(true); // 原随从回手
+    expect(st.a.board.some((m) => m.rush)).toBe(true); // 场上多了突袭舞者
+  });
+
+  it("暗影步:不回收本回合还能攻击的战吼随从(让它先攻击)", () => {
+    // 巴内斯(id 37,summonMini 战吼)非召唤失调、可攻击 → 暗影步不应回收它
+    const st = mkState({ a: side({ mana: 5, heroPowerUsed: true, deck: [], hand: [{ uid: 1, cid: 46 }], board: [minion({ uid: 10, cid: 37, atk: 3, hp: 4, sick: false })] }) });
+    expect(aiPlay(st)).toBe(false);
+    expect(st.a.board[0].uid).toBe(10); // 仍在场,留给攻击阶段
+    expect(st.a.hand.some((e) => e.cid === 46)).toBe(true); // 暗影步仍在手
+  });
+
+  it("暗影步:回收刚下场(召唤失调)的战吼随从以重触发战吼", () => {
+    const st = mkState({ a: side({ mana: 5, heroPowerUsed: true, deck: [], hand: [{ uid: 1, cid: 46 }], board: [minion({ uid: 10, cid: 37, atk: 3, hp: 4, sick: true })] }) });
+    expect(aiPlay(st)).toBe(true);
+    expect(st.a.hand.some((e) => e.cid === 37)).toBe(true); // 战吼随从回手待重打
   });
 });

@@ -8,12 +8,91 @@ import {
   playMinion, playWeapon, removeFromDeck, resolveAttack, resolveHeroAttack, sampleDeck, sampleDeckAny,
   startTurn, summonFromDeck, thawFrozen, useHeroPower,
 } from "./engine";
-import type { AttackTarget, Card, GameState, HandEntry, MinionCard } from "./types";
+import type { AttackTarget, Card, GameState, HandEntry, Minion, MinionCard } from "./types";
 
 // dmg/aoe 法术的基础伤害值(用于排序与斩杀计算)
 const spDmgN = (c: Card): number => (c.sp && (c.sp.k === "dmg" || c.sp.k === "aoe") ? c.sp.n : 0);
 
-export function aiPlay(st: GameState): boolean {
+// 随从本回合是否还能发起攻击(突袭随从在召唤失调期间也能攻击随从)。
+// 回收类法术(街舞起跳/暗影步)只回收"打不出去"的随从,绝不动正能攻击的随从,以免浪费伤害。
+const canAttackNow = (m: Minion): boolean => !m.attacked && m.atk > 0 && !m.frozen && (!m.sick || m.rush);
+
+// 当前手牌里可支付、能直击的单体伤害法术(含法伤加成),按手牌实体 uid 索引以便结算后重新定位
+const burnInHand = (st: GameState): { uid: number; dmg: number }[] => {
+  const A = st.a;
+  return A.hand
+    .map((e) => ({ e, c: effCard(st, "a", e) }))
+    .filter((h) => h.c.sp?.k === "dmg" && effCost(st, "a", h.c, h.e) <= A.mana)
+    .map((h) => ({ uid: h.e.uid, dmg: spDmgN(h.c) + (A.spellDmg || 0) }));
+};
+const handIdxByUid = (st: GameState, uid: number): number => st.a.hand.findIndex((e) => e.uid === uid);
+
+// 综合斩杀:把"非召唤失调随从攻击 + 英雄武器攻击 + 可支付的烧脸法术"合并成一套击杀序列。
+// 先用打不到脸的资源(突袭随从→烧脸→英雄→普通随从)清掉嘲讽,再全力打脸。
+// 每个原子动作后调用 step()(供 computeAiTurn 逐帧产出快照)。只在 lethalReachable 确认后对真实 state 执行。
+function forceKill(st: GameState, step?: () => void): void {
+  const A = st.a, P = st.p;
+  // 成功才推进快照;失败则返回 false,调用方据此跳出循环避免空转
+  const act = (fn: () => boolean): boolean => { st.fx = []; const ok = fn(); if (ok) step?.(); return ok; };
+  // 1) 逐个清掉嘲讽
+  let guard = 0;
+  while (!st.winner && P.board.some((m) => m.taunt) && guard++ < 24) {
+    const taunt = [...P.board].filter((m) => m.taunt).sort((a, b) => a.hp - b.hp)[0];
+    // a) 召唤失调的突袭随从打不了脸,优先拿来撞嘲讽(取刚好能击杀的,否则最小的去消耗)
+    const rushSick = A.board
+      .filter((m) => !m.attacked && m.atk > 0 && !m.frozen && m.sick && m.rush)
+      .sort((a, b) => a.atk - b.atk);
+    const r = rushSick.find((m) => m.atk >= taunt.hp) || rushSick[0];
+    if (r) { if (!act(() => resolveAttack(st, "a", r.uid, { uid: taunt.uid }))) break; continue; }
+    // b) 烧脸法术点掉嘲讽(取刚好够的,省下大的打脸)
+    const b = burnInHand(st).filter((x) => x.dmg >= taunt.hp).sort((a, b) => a.dmg - b.dmg)[0];
+    if (b) { if (!act(() => castSpell(st, "a", handIdxByUid(st, b.uid), { side: "p", uid: taunt.uid }))) break; continue; }
+    // c) 英雄攻击嘲讽
+    if (heroAtkVal(A) >= taunt.hp && !A.heroAttacked) {
+      if (!act(() => resolveHeroAttack(st, "a", { uid: taunt.uid }))) break; continue;
+    }
+    // d) 最后才动用能打脸的随从
+    const m = A.board
+      .filter((x) => !x.attacked && x.atk > 0 && !x.frozen && !x.sick && x.atk >= taunt.hp)
+      .sort((a, b) => a.atk - b.atk)[0];
+    if (m) { if (!act(() => resolveAttack(st, "a", m.uid, { uid: taunt.uid }))) break; continue; }
+    break; // 清不掉嘲讽,放弃(克隆模拟里走到这步即视为不可斩杀)
+  }
+  if (st.winner || P.board.some((m) => m.taunt)) return;
+  // 2) 全力打脸:随从 → 英雄 → 剩余烧脸
+  guard = 0;
+  while (!st.winner && guard++ < 24) {
+    const m = A.board.find((x) => !x.attacked && x.atk > 0 && !x.frozen && !x.sick);
+    if (!m || !act(() => resolveAttack(st, "a", m.uid, { hero: true }))) break;
+  }
+  if (!st.winner && heroAtkVal(A) > 0 && !A.heroAttacked) act(() => resolveHeroAttack(st, "a", { hero: true }));
+  guard = 0;
+  while (!st.winner && guard++ < 24) {
+    const b = burnInHand(st).sort((a, b) => b.dmg - a.dmg)[0];
+    if (!b || !act(() => castSpell(st, "a", handIdxByUid(st, b.uid), { side: "p", hero: true }))) break;
+  }
+}
+
+// 在克隆上跑一遍 forceKill,看是否真能把玩家打死(同一份确定性代码,真机回放必然复现)。
+function lethalReachable(st: GameState): boolean {
+  const c = clone(st);
+  forceKill(c);
+  return c.winner === "a";
+}
+
+// 模拟“接下来这一整回合还能花掉多少法力”(用于幸运币价值判断)。在去掉所有币的克隆上循环跑 aiPlay。
+function simSpend(s: GameState): number {
+  let spent = 0, guard = 0;
+  while (guard++ < 16) {
+    const m0 = s.a.mana;
+    if (!aiPlay(s, true)) break; // noSim:模拟里禁用幸运币分支,避免 aiPlay↔simSpend 无限递归
+    spent += m0 - s.a.mana;
+  }
+  return spent;
+}
+
+// noSim=true 时禁用会自我模拟(simSpend)的分支,供 simSpend 内部调用以杜绝递归
+export function aiPlay(st: GameState, noSim = false): boolean {
   const A = st.a, P = st.p;
   // effCard 解析殒命暗影:在手牌中即视为上一张打出的法术(无可复制时仍为原牌,不会被任何分支选中)
   const hand = A.hand.map((e, i) => ({ i, c: effCard(st, "a", e), e }));
@@ -133,12 +212,17 @@ export function aiPlay(st: GameState): boolean {
       return true;
     }
   }
-  // 幸运币:恰好能解锁一张差 1 费的牌时使用
+  // 幸运币:仅当“多这 1 费,本回合能多花掉法力(打出更贵/更多的牌)”时才用,否则留着,避免空过浪费
   const coin = can.find((h) => h.c.sp?.k === "coin");
-  if (coin && A.mana < 10 && hand.some((h) => effCost(st, "a", h.c) === A.mana + 1)) {
-    if (castSpell(st, "a", coin.i, null)) {
-      log(st, "对手使用了「幸运币」");
-      return true;
+  if (coin && A.mana < 10 && !noSim) {
+    // simSpend 走 noSim,内部不会再碰幸运币分支,故无需在克隆里剔除币
+    const without = clone(st);
+    const withc = clone(st); withc.a.mana = Math.min(10, withc.a.mana + 1);
+    if (simSpend(withc) > simSpend(without)) {
+      if (castSpell(st, "a", coin.i, null)) {
+        log(st, "对手使用了「幸运币」");
+        return true;
+      }
     }
   }
   // 月光指引:发现费用最高的牌
@@ -199,11 +283,15 @@ export function aiPlay(st: GameState): boolean {
   if (regear && A.hand.length <= 6 && A.deck.length > 3) {
     if (castSpell(st, "a", regear.i, null)) { log(st, `对手使用了「${regear.c.name}」`); return true; }
   }
-  // 街舞起跳:复制场上最强随从(有随从且未满场)
+  // 街舞起跳:只回收“本回合无法攻击”的随从(刚下、非突袭的召唤失调随从),换成能突袭交换的舞者;
+  // 绝不回收本回合能动的随从,以免浪费其攻击/葬送斩杀(斩杀已在 computeAiTurn 前置处理)
   const dance = can.find((h) => h.c.sp?.k === "bounce");
-  if (dance && A.board.length && A.board.length < 6) {
-    const m = [...A.board].sort((a, b) => b.atk + b.hp - (a.atk + a.hp))[0];
-    if (castSpell(st, "a", dance.i, { side: "a", uid: m.uid })) { log(st, `对手对「${m.name}」使用了「${dance.c.name}」`); return true; }
+  if (dance && A.board.length < 6) {
+    const cand = A.board.filter((m) => !canAttackNow(m));
+    if (cand.length) {
+      const m = [...cand].sort((a, b) => b.atk + b.hp - (a.atk + a.hp))[0];
+      if (castSpell(st, "a", dance.i, { side: "a", uid: m.uid })) { log(st, `对手对「${m.name}」使用了「${dance.c.name}」`); return true; }
+    }
   }
   // 异教地图:发现并抽一张(取费用最高);若本回合稍后打出它,触发后续抽取
   const map = can.find((h) => h.c.sp?.k === "map");
@@ -246,9 +334,10 @@ export function aiPlay(st: GameState): boolean {
   // 暗影步:回收一个召唤/加税类战吼随从以重施(需本回合能再打出,0 费不占用法力)
   const sstep = can.find((h) => h.c.sp?.k === "shadowstep");
   if (sstep && A.board.length) {
+    // 只回收本回合无法攻击的战吼随从(刚下场等),绝不回收正能攻击的随从——让它先攻击
     const reuse = A.board.find((m) => {
       const cc = byId[m.cid];
-      return !!cc.bc && (cc.bc.k === "summonMini" || cc.bc.k === "loatheb") && Math.max(0, cc.cost - 2) <= A.mana;
+      return !canAttackNow(m) && !!cc.bc && (cc.bc.k === "summonMini" || cc.bc.k === "loatheb") && Math.max(0, cc.cost - 2) <= A.mana;
     });
     if (reuse && castSpell(st, "a", sstep.i, { side: "a", uid: reuse.uid })) {
       log(st, `对手对「${reuse.name}」使用了「${sstep.c.name}」`);
@@ -345,8 +434,12 @@ export function computeAiTurn(b: GameState): GameState[] {
   if (!st.winner) log(st, "对手抽了一张牌");
   push();
   if (st.winner) return snaps;
+  // 出牌阶段:每步前先查综合斩杀(随从+英雄+烧脸),够斩杀就停手铺场转入击杀序列
   let g = 0;
-  while (g++ < 12 && !st.winner) { st.fx = []; if (!aiPlay(st)) break; push(); }
+  while (g++ < 12 && !st.winner) { if (lethalReachable(st)) break; st.fx = []; if (!aiPlay(st)) break; push(); }
+  // 综合斩杀:一次性把随从攻击、英雄攻击、烧脸法术串成击杀(替代被割裂的三段式判断)
+  if (!st.winner && lethalReachable(st)) forceKill(st, push);
+  if (st.winner) return snaps;
   g = 0;
   while (g++ < 12 && !st.winner) { st.fx = []; if (!aiAttack(st)) break; push(); }
   st.fx = []; if (!st.winner && aiHeroAttack(st)) push(); // 英雄武器/变形攻击
