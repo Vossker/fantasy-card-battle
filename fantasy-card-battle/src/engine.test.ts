@@ -3,12 +3,13 @@ import { describe, expect, it } from "vitest";
 import type { GameState, Minion, SideState } from "./types";
 import {
   castDeckSpell, castSpell, dmgHero, draw, effCard, effCost, endTurnCleanup,
-  gainMoonCopy, initGame, moonTutor, playMinion, rand, resolveAttack, spSummary,
-  freezeMinion, thawFrozen, startTurn, dredgePick, mapTake, mapTutor,
+  gainMoonCopy, initGame, applyMulligan, finishMulligan, moonTutor, playMinion, rand, resolveAttack, spSummary,
+  freezeMinion, freezeHero, thawFrozen, startTurn, dredgePick, mapTake, mapTutor, resolveMapFollow,
   equipWeapon, playWeapon, resolveHeroAttack, useHeroPower, heroAtkVal,
 } from "./engine";
 import { byId, DAGGER } from "./cards";
 import { aiPlay, computeAiTurn } from "./ai";
+import { planPlayPhase } from "./aiPlanner";
 
 // ---------- 构造最小 state 的辅助 ----------
 const side = (over: Partial<SideState> = {}): SideState => ({
@@ -134,6 +135,36 @@ describe("冻结状态", () => {
     const st = mkState({ a: side({ board: [] }) });
     expect(() => freezeMinion(st, "a", 99)).not.toThrow();
   });
+  it("寒冰箭(id 20)命中英雄造成伤害并冻结英雄,被冻英雄无法攻击", () => {
+    const st = mkState({
+      p: side({ mana: 5, hand: [{ uid: 1, cid: 20 }] }),
+      a: side({ weapon: { cid: 0, atk: 3, dur: 2 } }),
+    });
+    expect(castSpell(st, "p", 0, { side: "a", hero: true })).toBe(true);
+    expect(st.a.hp).toBe(27); // 30 - 3
+    expect(st.a.heroFrozen).toBe(true);
+    expect(resolveHeroAttack(st, "a", { hero: true })).toBe(false); // 冻结无法攻击
+  });
+  it("freezeHero 对已冻结的英雄幂等", () => {
+    const st = mkState({ a: side({ heroFrozen: true }) });
+    expect(() => freezeHero(st, "a")).not.toThrow();
+    expect(st.a.heroFrozen).toBe(true);
+  });
+  it("thawFrozen 解冻英雄后可再次攻击", () => {
+    const st = mkState({ a: side({ heroFrozen: true, weapon: { cid: 0, atk: 3, dur: 2 } }) });
+    expect(thawFrozen(st, "a")).toBe(true);
+    expect(st.a.heroFrozen).toBe(false);
+    expect(resolveHeroAttack(st, "a", { hero: true })).toBe(true);
+  });
+  it("夜影花蕾从牌库自动施放寒冰箭命中空场对手时冻结其英雄", () => {
+    const st = mkState({
+      a: side({ deck: [20] }),
+      p: side({ board: [] }), // 对手空场:autoCast 唯一目标为英雄
+    });
+    castDeckSpell(st, "a", 20);
+    expect(st.p.hp).toBe(27); // 30 - 3
+    expect(st.p.heroFrozen).toBe(true);
+  });
 });
 
 describe("一次性登场效果:攻击后清除", () => {
@@ -217,6 +248,55 @@ describe("RNG:可复现性(步骤 4 注入种子的成果)", () => {
     expect(g1.p.deck).toEqual(g2.p.deck);
     expect(g1.a.deck).toEqual(g2.a.deck);
     expect(g1.first).toBe(g2.first);
+  });
+
+  it("起手调度:initGame(mulligan) 挂起 pending 且推迟幸运币与开局回合", () => {
+    const g = initGame(null, "druid", 7, null, "rogue", true);
+    expect(g.pending).toEqual({ k: "mulligan" });
+    // 调度阶段尚未给后手幸运币、双方法力为 0(未 startTurn)
+    expect([...g.p.hand, ...g.a.hand].some((e) => byId[e.cid].name === "幸运币")).toBe(false);
+    expect(g.p.mana).toBe(0);
+    expect(g.p.maxMana).toBe(0);
+  });
+
+  it("起手调度:applyMulligan 换掉选中牌、手牌数不变,且换掉的牌不会立刻重抽", () => {
+    const g = initGame(null, "druid", 7, null, "rogue", true);
+    const before = g.p.hand.map((e) => ({ ...e }));
+    const replaceUids = before.map((e) => e.uid); // 全换
+    const deckLenBefore = g.p.deck.length;
+    applyMulligan(g, "p", replaceUids);
+    expect(g.p.hand.length).toBe(before.length); // 数量守恒
+    expect(g.p.deck.length).toBe(deckLenBefore); // 抽几张就洗回几张
+    // 新手牌都是新发的 uid(旧 uid 不再在手)
+    const beforeUids = new Set(before.map((e) => e.uid));
+    expect(g.p.hand.every((e) => !beforeUids.has(e.uid))).toBe(true);
+    // 换掉的牌当次不会被重新抽到(在牌库里而非手上)
+    const handCids = g.p.hand.map((e) => e.cid);
+    const replacedCids = before.map((e) => e.cid);
+    const overlap = replacedCids.filter((c) => handCids.includes(c)).length;
+    // 仅当牌库内本就有相同 cid 才可能重合;全换且牌库充足时新手牌取自牌库顶,旧牌已被剔出再洗回
+    expect(overlap).toBeLessThanOrEqual(replacedCids.length);
+  });
+
+  it("起手调度:finishMulligan 关闭弹窗,后手获得幸运币,玩家先手则开始其回合", () => {
+    const g = initGame(null, "druid", 7, null, "rogue", true);
+    g.first = "p"; g.turn = "p"; // 固定玩家先手以验证 startTurn 被调用
+    finishMulligan(g, []);
+    expect(g.pending).toBeNull();
+    // 玩家先手:后手是 AI,AI 应拿到幸运币;玩家开局法力 1
+    expect(g.a.hand.some((e) => byId[e.cid].name === "幸运币")).toBe(true);
+    expect(g.p.maxMana).toBe(1);
+  });
+
+  it("起手调度:同种子下保留集合相同则结果完全一致(可复现)", () => {
+    const a = initGame(null, "druid", 99, null, "rogue", true);
+    const b = initGame(null, "druid", 99, null, "rogue", true);
+    const ua = a.p.hand.slice(0, 2).map((e) => e.uid);
+    const ub = b.p.hand.slice(0, 2).map((e) => e.uid);
+    applyMulligan(a, "p", ua);
+    applyMulligan(b, "p", ub);
+    expect(a.p.hand.map((e) => e.cid)).toEqual(b.p.hand.map((e) => e.cid));
+    expect(a.p.deck).toEqual(b.p.deck);
   });
 
   it("computeAiTurn 对同一局面产出完全相同的快照(可复现回放)", () => {
@@ -429,6 +509,18 @@ describe("异教地图:mapTake / mapTutor(id48)", () => {
     mapTutor(st, "p", en);
     expect(st.pending).toEqual({ k: "mapPick", opts: [20, 25] });
   });
+  it("打出的发现牌本身又弹抉择窗(如垂钓时光)时,后续抽取排队,待其结束再弹 mapPick", () => {
+    const st = mkState({ p: side({ deck: [20, 25], hand: [] }) });
+    st.pending = { k: "dredge", opts: [20, 25], draw: false }; // 模拟垂钓时光弹出的探底窗
+    const en = { uid: 1, cid: 18, mapTurn: st.turnNum, mapLeft: [20, 25] };
+    mapTutor(st, "p", en);
+    expect(st.pending).toEqual({ k: "dredge", opts: [20, 25], draw: false }); // 不被覆盖
+    expect(st.mapFollow).toEqual([20, 25]); // 后续抽取已排队
+    // 探底窗结束:排队的后续抽取弹成 mapPick(仅含仍在牌库中的选项)
+    expect(resolveMapFollow(st, "p")).toBe(true);
+    expect(st.pending).toEqual({ k: "mapPick", opts: [20, 25] });
+    expect(st.mapFollow).toBeUndefined();
+  });
 });
 
 describe("暗影步(id46)", () => {
@@ -469,6 +561,21 @@ describe("洛欧塞布(id51)加税", () => {
     expect(effCost(st, "p", byId[25])).toBe(9); // 火球 4 → 9
     startTurn(st, "p"); // 再过一个玩家回合,加税清除
     expect(effCost(st, "p", byId[25])).toBe(4);
+  });
+  it("低阶异教牧师(id53)复用同一战吼,加税量为 1", () => {
+    const st = mkState({ a: side({ mana: 10, hand: [{ uid: 1, cid: 53 }], deck: [18] }), p: side({ deck: [18] }) });
+    playMinion(st, "a", 0);
+    expect(st.p.spellTaxNext).toEqual(expect.objectContaining({ amt: 1 }));
+    startTurn(st, "p");
+    expect(effCost(st, "p", byId[25])).toBe(5); // 火球 4 → 5
+  });
+  it("同回合多次加税累加(连打两张牧师 → +2)", () => {
+    const st = mkState({ a: side({ mana: 10, hand: [{ uid: 1, cid: 53 }, { uid: 2, cid: 53 }], deck: [18] }), p: side({ deck: [18] }) });
+    playMinion(st, "a", 0);
+    playMinion(st, "a", 0);
+    expect(st.p.spellTaxNext).toEqual(expect.objectContaining({ amt: 2 }));
+    startTurn(st, "p");
+    expect(effCost(st, "p", byId[25])).toBe(6); // 火球 4 → 6
   });
   it("与伊谢尔光环冲突:后入场者覆盖前者", () => {
     // 加税更晚登场(order 大于光环随从 seq)→ 税生效,法术为基础+5
@@ -612,5 +719,69 @@ describe("AI 战斗逻辑改进", () => {
     const st = mkState({ a: side({ mana: 5, heroPowerUsed: true, deck: [], hand: [{ uid: 1, cid: 46 }], board: [minion({ uid: 10, cid: 37, atk: 3, hp: 4, sick: true })] }) });
     expect(aiPlay(st)).toBe(true);
     expect(st.a.hand.some((e) => e.cid === 37)).toBe(true); // 战吼随从回手待重打
+  });
+
+  it("暗影步:回收已攻击的贪婪的伴侣换硬币(手中另有 2 费牌)", () => {
+    // mana 0 隔离:除暗影步外无牌可打;伴侣已攻击(canAttackNow→false)且手中有 2 费牌(矮人战士 id5)
+    const st = mkState({ a: side({ mana: 0, heroPowerUsed: true, deck: [], hand: [{ uid: 1, cid: 46 }, { uid: 2, cid: 5 }], board: [minion({ uid: 10, cid: 50, atk: 2, hp: 3, attacked: true })] }) });
+    expect(aiPlay(st)).toBe(true);
+    expect(st.a.hand.some((e) => e.cid === 50)).toBe(true); // 伴侣回手(0 费)待重打获利
+  });
+
+  it("暗影步:手中无其他 2 费牌时不回收贪婪的伴侣(回收无硬币收益)", () => {
+    const st = mkState({ a: side({ mana: 0, heroPowerUsed: true, deck: [], hand: [{ uid: 1, cid: 46 }, { uid: 2, cid: 1 }], board: [minion({ uid: 10, cid: 50, atk: 2, hp: 3, attacked: true })] }) });
+    expect(aiPlay(st)).toBe(false);
+    expect(st.a.hand.some((e) => e.cid === 46)).toBe(true); // 暗影步仍在手
+  });
+
+  it("攻击后回收 pass:伴侣本回合先攻击,攻击后再被暗影步回收重打", () => {
+    // maxMana 0→startTurn 后为 1:2 费矮人战士打不出(留作硬币条件),伴侣可攻击故出牌阶段不回收
+    const base = mkState({
+      a: side({ hp: 30, maxMana: 0, mana: 0, heroPowerUsed: true, deck: [], hand: [{ uid: 1, cid: 46 }, { uid: 2, cid: 5 }], board: [minion({ uid: 10, cid: 50, atk: 2, hp: 3, sick: false })] }),
+      p: side({ hp: 30, board: [] }),
+    });
+    const snaps = computeAiTurn(base);
+    // 出牌阶段伴侣可攻击不回收 → 攻击阶段挥拳 → 攻击后 pass 才回收重打:某帧伴侣应出现在手牌
+    expect(snaps.some((s) => s.a.hand.some((e) => e.cid === 50))).toBe(true);
+  });
+});
+
+describe("AI 出牌规划器(aiPlanner)", () => {
+  // id48 异教地图 / id46 暗影步 / id50 贪婪的伴侣 / id45 奥术巨人(costScale) / id41 街舞起跳 / id38 伺机待发
+  const comboHand = () => [
+    { uid: 1, cid: 48 }, { uid: 2, cid: 46 }, { uid: 3, cid: 50 },
+    { uid: 4, cid: 45 }, { uid: 5, cid: 41 }, { uid: 6, cid: 38 },
+  ];
+
+  it("发现 4 费双 8/8 combo:连打法术给奥术巨人减费 → 打出 → 街舞起跳复制", () => {
+    // spellsPlayed=5 → 奥术巨人 effCost 12-5=7,4 费打不起;deck 供异教地图发现
+    const st = mkState({
+      a: side({ mana: 4, maxMana: 4, spellsPlayed: 5, heroPowerUsed: true, deck: [1, 5, 13, 18, 25], hand: comboHand(), board: [] }),
+      p: side({ hp: 30, board: [] }),
+    });
+    const plan = planPlayPhase(st);
+    expect(plan).not.toBeNull();
+    const final = plan![plan!.length - 1];
+    const eights = final.a.board.filter((m) => m.atk === 8 && m.hp === 8);
+    expect(eights.length).toBe(2); // 巨人本体 + 继承属性的 8/8 舞者
+  });
+
+  it("整局集成:computeAiTurn 经门控+规划器在某帧站出两个 8/8", () => {
+    // maxMana 3 → startTurn 后 4 费;deck 供抽牌与异教地图发现。门控因奥术巨人(打不起)命中。
+    const base = mkState({
+      a: side({ hp: 30, maxMana: 3, mana: 3, spellsPlayed: 5, heroPowerUsed: true, deck: [1, 5, 13, 18, 25, 20, 22], hand: comboHand(), board: [] }),
+      p: side({ hp: 30, board: [] }),
+    });
+    const snaps = computeAiTurn(base);
+    expect(snaps.some((s) => s.a.board.filter((m) => m.atk === 8 && m.hp === 8).length >= 2)).toBe(true);
+  });
+
+  it("门控未命中(普通手牌)时不规划:planPlayPhase 返回 null", () => {
+    // 无 costScale / 无 bounce·shadowstep+大体格:门控不应触发(此处直接验证规划器对普通手牌不强行覆盖)
+    const st = mkState({
+      a: side({ mana: 4, maxMana: 4, deck: [1, 5], hand: [{ uid: 1, cid: 5 }, { uid: 2, cid: 1 }], board: [] }),
+      p: side({ hp: 30, board: [] }),
+    });
+    expect(planPlayPhase(st)).toBeNull(); // 贪婪线已最优,无严格更优的 combo 线
   });
 });

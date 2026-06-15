@@ -63,9 +63,10 @@ export const POOL: Card[] = [
   { id: 47, name: "垂钓时光", emoji: "🎣", cost: 1, type: "s", rarity: "r", classes: ["rogue"], sp: { k: "dredge", comboDraw: 1 }, desc: "探底。连击:抽取这张牌。" },
   { id: 48, name: "异教地图", emoji: "🗺️", cost: 2, type: "s", rarity: "r", classes: ["rogue"], sp: { k: "map" }, desc: "从牌库中发现一张牌并抽取;如果你在本回合使用这张牌,则从剩余选项中选一张牌并抽取。" },
   { id: 49, name: "鬼魅攻击", emoji: "👻", cost: 1, type: "s", rarity: "r", classes: ["rogue"], sp: { k: "dmg", n: 1, t: "any", comboDraw: 1 }, desc: "造成 1 点伤害。连击:抽一张牌。" },
-  { id: 50, name: "贪婪的伴侣", emoji: "🐀", cost: 2, type: "m", rarity: "r", atk: 2, hp: 3, bc: { k: "greedyCoin" }, desc: "【战吼】如果你手牌中有其他 2 费牌,获得一张幸运币。" },
+  { id: 50, name: "贪婪的伴侣", emoji: "🐀", cost: 2, type: "m", rarity: "c", atk: 2, hp: 3, bc: { k: "greedyCoin" }, desc: "【战吼】如果你手牌中有其他 2 费牌,获得一张幸运币。" },
   { id: 51, name: "洛欧塞布", emoji: "🦠", cost: 5, type: "m", rarity: "l", atk: 5, hp: 5, bc: { k: "loatheb" }, desc: "【战吼】你的对手下个回合法术的法力消耗增加 5 点。" },
   { id: 52, name: "炽炎战斧", emoji: "🪓", cost: 3, type: "w", rarity: "c", atk: 3, dur: 2, desc: "为你的英雄装备一把 3 攻击力 / 2 耐久的战斧。" },
+  { id: 53, name: "低阶异教牧师", emoji: "🙅‍♀️", cost: 2, type: "m", rarity: "r", atk: 3, hp: 2, bc: { k: "loatheb", amt: 1 }, desc: "【战吼】你的对手下个回合法术的法力消耗增加 1 点。" },
 ];
 // token 衍生牌:不进 POOL(不出现在牌组构建器),单独注册进 byId
 export const COIN: Card = { id: 99, name: "幸运币", emoji: "🪙", cost: 0, type: "s", rarity: "c", sp: { k: "coin" }, token: 1, desc: "在本回合获得一个法力水晶。" };

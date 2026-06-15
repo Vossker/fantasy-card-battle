@@ -58,7 +58,7 @@ export interface MinionCard extends CardBase {
   charge?: 1;
   rush?: 1; // 突袭:登场当回合可攻击敌方随从,但不能攻击英雄
   aura?: "cheapSpells";
-  bc?: { k: "summonMini" } | { k: "greedyCoin" } | { k: "loatheb" };
+  bc?: { k: "summonMini" } | { k: "greedyCoin" } | { k: "loatheb"; amt?: number }; // loatheb.amt:对手下回合法术加税量(缺省 5)
   costScale?: "spellsPlayed"; // 奥术巨人:每使用过一张法术,费用 -1(下限 0)
   inheritStats?: 1; // 属性继承型 token(如舞者):卡面 atk/hp 仅占位,被街舞起跳弹回手牌时记录属性快照
   dur?: undefined;
@@ -135,6 +135,7 @@ export interface SideState {
   weapon?: { cid: number; atk: number; dur: number } | null; // 当前装备的武器(null/缺省 = 无)
   heroAtk?: number; // 英雄临时攻击力加成(德鲁伊变形),仅当回合(startTurn 清零)
   heroAttacked?: boolean; // 本回合英雄是否已用攻击力发起过攻击(startTurn 清零)
+  heroFrozen?: boolean; // 冻结:被冻结的英雄下个能攻击的回合无法攻击,该回合结束 thawFrozen 解冻
   heroPowerUsed?: boolean; // 本回合是否已使用英雄技能(startTurn 清零)
   spellDmg: number; // 法伤加成,仅持续当前回合(startTurn 时双方清零)
   spellDiscount?: number; // 伺机待发:下一张法术减费量,仅本回合(startTurn 时本方清零)
@@ -167,6 +168,7 @@ export interface LogEntry {
 // 抉择弹窗。choose / bloomMode 为延迟支付(存手牌索引 i,确认时才扣费离手,可取消);
 // 其余在进入弹窗前已支付,不可取消
 export type Pending =
+  | { k: "mulligan" } // 起手调度:开局弹窗,玩家选任意张手牌洗回牌库重抽
   | { k: "choose"; i: number; name: string; emoji: string; opts: ChooseOpt[] }
   | { k: "bloomMode"; i: number }
   | { k: "bloomPick"; mode: BloomMode; opts: number[] }
@@ -187,6 +189,15 @@ export interface AttackTarget {
   hero?: boolean;
 }
 
+// 动作标记:记录"谁对谁做了什么",供 UI 画攻击/法术箭头与攻击前顶动画。
+// 每次设置取新 id(变更即触发一次动画),不参与规则计算。
+export interface ActMark {
+  id: number;
+  kind: "attack" | "dmg" | "heal" | "buff";
+  src: { side: Side; uid?: number; hero?: boolean };
+  tgt: { side: Side; uid?: number; hero?: boolean };
+}
+
 export interface GameState {
   phase: "play" | "over";
   turn: Side;
@@ -200,7 +211,9 @@ export interface GameState {
   lastLog: string;
   notice: { text: string; id: number } | null;
   pending: Pending | null;
+  mapFollow?: number[]; // 异教地图后续抽取的待办选项:打出"发现牌"时若正弹着别的抉择窗(如探底),先排队,待其结束再弹 mapPick
   banner: { text: string; id: number } | null;
+  act?: ActMark | null; // 最近一次攻击/指向性法术(UI 箭头与前顶动画用,非规则状态)
   p: SideState;
   a: SideState;
 }

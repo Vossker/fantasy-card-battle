@@ -2,7 +2,7 @@
 // 所有函数签名形如 fn(st, side, ...):直接修改传入的 state 对象 st,side 为 "p"(玩家)或 "a"(AI)
 import { CLASS_IDS, COIN, DAGGER, DANCER, HAND_LIMIT, HERO_POWER_COST, buildDeck, byId, shuffle, spTarget } from "./cards";
 import type {
-  AttackTarget, BloomMode, Card, CampOpt, ChooseOpt, ClassId, GameState, HandEntry,
+  ActMark, AttackTarget, BloomMode, Card, CampOpt, ChooseOpt, ClassId, GameState, HandEntry,
   MinionCard, Side, SideState, SpellDef, SpellTarget,
 } from "./types";
 
@@ -26,6 +26,10 @@ export const randPick = <T>(st: GameState, arr: T[]): T => arr[randInt(st, arr.l
 
 export function fx(st: GameState, key: string, text: string, color: string) {
   st.fx.push({ id: FXID++, key, text, color, ts: Date.now() });
+}
+// 记录一次动作(攻击/指向性法术),供 UI 画箭头与攻击前顶动画。每次取新 id。
+export function markAct(st: GameState, kind: ActMark["kind"], src: ActMark["src"], tgt: ActMark["tgt"]) {
+  st.act = { id: FXID++, kind, src, tgt };
 }
 export function log(st: GameState, text: string, important = false) {
   st.lastLog = text;
@@ -62,12 +66,20 @@ export function freezeMinion(st: GameState, side: Side, uid: number) {
   m.frozen = true;
   fx(st, "m" + uid, "❄️冻结", "#bfe9ff");
 }
-// 解冻所属一方的随从:在该方回合结束时调用,使其冻结恰好覆盖一个能攻击的回合。返回是否有随从被解冻。
+// 冻结一方英雄:被冻结的英雄下个能攻击的回合无法攻击,该回合结束由 thawFrozen 解冻。
+export function freezeHero(st: GameState, side: Side) {
+  const s = st[side];
+  if (s.heroFrozen) return;
+  s.heroFrozen = true;
+  fx(st, side + "-hero", "❄️冻结", "#bfe9ff");
+}
+// 解冻所属一方的随从与英雄:在该方回合结束时调用,使其冻结恰好覆盖一个能攻击的回合。返回是否有任何单位被解冻。
 export function thawFrozen(st: GameState, side: Side): boolean {
   let any = false;
   st[side].board.forEach((m) => {
     if (m.frozen) { m.frozen = false; fx(st, "m" + m.uid, "解冻", "#bfe9ff"); any = true; }
   });
+  if (st[side].heroFrozen) { st[side].heroFrozen = false; fx(st, side + "-hero", "解冻", "#bfe9ff"); any = true; }
   return any;
 }
 export function draw(st: GameState, side: Side, n: number) {
@@ -83,7 +95,7 @@ export function draw(st: GameState, side: Side, n: number) {
     }
     const cid = s.deck.pop()!;
     if (s.hand.length >= HAND_LIMIT) {
-      log(st, who + `的手牌已满,「${byId[cid].name}」被烧掉了`, true);
+      log(st, who + `的手牌已满,${side === "p" ? `「${byId[cid].name}」` : "一张牌"}被烧掉了`, true);
       notice(st, `🔥 ${who}的手牌已满,「${byId[cid].name}」被烧掉了!`);
       continue;
     }
@@ -123,6 +135,7 @@ export function playMinion(st: GameState, side: Side, i: number): boolean {
     atk: c.atk, hp: c.hp, maxHp: c.hp,
     taunt: !!c.taunt, charge: !!c.charge, rush: !!c.rush, sick: !c.charge, attacked: false, frozen: false, seq: ENTRY++,
   });
+  log(st, `${side === "p" ? "你" : "对手"}打出了「${c.name}」`); // 先宣告打出,战吼等效果日志自然排在其后
   if (c.bc) doBattlecry(st, side, c);
   s.playedThisTurn = (s.playedThisTurn || 0) + 1; // 连击:打出随从也计入"使用过的牌"
   moonTutor(st, side, en);
@@ -150,8 +163,10 @@ function doBattlecry(st: GameState, side: Side, c: MinionCard) {
     log(st, `「${c.name}」:手牌中有其他 2 费牌,获得一张幸运币`);
   } else if (c.bc?.k === "loatheb") {
     const e = other(side);
-    st[e].spellTaxNext = { amt: 5, order: ENTRY++ }; // 取一格登场序:晚于此前登场的伊谢尔,早于此后登场的
-    log(st, `「${c.name}」:${e === "p" ? "你" : "对手"}下个回合法术费用增加 5 点`, true);
+    const amt = c.bc.amt ?? 5;
+    // 同回合多次加税累加(如连打两张牧师);order 取最新一格登场序,与伊谢尔光环比先后
+    st[e].spellTaxNext = { amt: (st[e].spellTaxNext?.amt ?? 0) + amt, order: ENTRY++ };
+    log(st, `「${c.name}」:${e === "p" ? "你" : "对手"}下个回合法术费用增加 ${amt} 点`, true);
   }
 }
 // 月光指引:本回合内打出发现的复制,则从牌库定向抽取本体
@@ -163,12 +178,13 @@ export function moonTutor(st: GameState, side: Side, en: HandEntry) {
   if (i < 0) return;
   const cid = s.deck.splice(i, 1)[0];
   const who = side === "p" ? "你" : "对手";
+  const nm = side === "p" ? `「${byId[cid].name}」` : ""; // 对手的本体牌名不公开
   if (s.hand.length >= HAND_LIMIT) {
-    log(st, `「月光指引」:${who}的手牌已满,本体「${byId[cid].name}」被烧掉了`, true);
+    log(st, `「月光指引」:${who}的手牌已满,本体${nm}被烧掉了`, true);
     return;
   }
   s.hand.push({ uid: UID++, cid });
-  log(st, `「月光指引」:${who}打出了复制,从牌库抽取了本体「${byId[cid].name}」`);
+  log(st, `「月光指引」:${who}打出了复制,从牌库抽取了本体${nm}`);
 }
 // 连击:本回合在打出当前这张牌之前,是否已使用过其他牌(随从或法术都算)
 export const combo = (st: GameState, side: Side): boolean => (st[side].playedThisTurn || 0) > 0;
@@ -178,18 +194,20 @@ export function mapTake(st: GameState, side: Side, cid: number, left: number[]) 
   const s = st[side];
   const who = side === "p" ? "你" : "对手";
   removeFromDeck(st, side, cid);
-  if (s.hand.length >= HAND_LIMIT) { log(st, `${who}的手牌已满,「${byId[cid].name}」被烧掉了`, true); return; }
+  const nm = side === "p" ? `「${byId[cid].name}」` : "一张牌"; // 对手发现的牌名不公开
+  if (s.hand.length >= HAND_LIMIT) { log(st, `${who}的手牌已满,${nm}被烧掉了`, true); return; }
   s.hand.push({ uid: UID++, cid, mapTurn: st.turnNum, mapLeft: left });
-  log(st, `「异教地图」:${who}发现并抽取了「${byId[cid].name}」`);
+  log(st, `「异教地图」:${who}发现并抽取了${nm}`);
 }
 // 异教地图(后续):从剩余选项里把 cid 抽到手
 export function mapDrawLeft(st: GameState, side: Side, cid: number) {
   const s = st[side];
   const who = side === "p" ? "你" : "对手";
   removeFromDeck(st, side, cid);
-  if (s.hand.length >= HAND_LIMIT) { log(st, `${who}的手牌已满,「${byId[cid].name}」被烧掉了`, true); return; }
+  const nm = side === "p" ? `「${byId[cid].name}」` : "一张牌"; // 对手抽取的牌名不公开
+  if (s.hand.length >= HAND_LIMIT) { log(st, `${who}的手牌已满,${nm}被烧掉了`, true); return; }
   s.hand.push({ uid: UID++, cid });
-  log(st, `「异教地图」:${who}又抽取了「${byId[cid].name}」`);
+  log(st, `「异教地图」:${who}又抽取了${nm}`);
 }
 // 异教地图触发:本回合打出"发现得来的牌"时,从剩余选项再抽一张。
 // 任何"从手牌打出"的路径都应在 moonTutor 之后调用。玩家走弹窗抉择,AI 自动取费用最高者。
@@ -199,11 +217,21 @@ export function mapTutor(st: GameState, side: Side, en: HandEntry) {
   const opts = en.mapLeft.filter((cid) => s.deck.includes(cid)); // 仍在牌库中的剩余选项
   if (!opts.length) return;
   if (side === "p") {
-    st.pending = { k: "mapPick", opts };
+    // 打出"发现牌"时本身又弹出了抉择窗(探底/夜影花蕾/抉择等):不能直接覆盖该窗,先排队,待其结束再弹 mapPick
+    if (st.pending) st.mapFollow = opts;
+    else st.pending = { k: "mapPick", opts };
   } else {
     const pick = [...opts].sort((x, y) => byId[y].cost - byId[x].cost)[0];
     mapDrawLeft(st, "a", pick);
   }
+}
+// 前一个抉择窗(探底等)结束后,把排队的异教地图后续抽取弹成 mapPick;无待办则返回 false
+export function resolveMapFollow(st: GameState, side: Side): boolean {
+  const opts = (st.mapFollow || []).filter((cid) => st[side].deck.includes(cid));
+  delete st.mapFollow;
+  if (!opts.length) return false;
+  st.pending = { k: "mapPick", opts };
+  return true;
 }
 // 探底:把牌库底部(deck 开头)第 idx 张移到牌库顶(deck 末尾);andDraw 为真则随即抽取该牌
 export function dredgePick(st: GameState, side: Side, idx: number, andDraw: boolean) {
@@ -212,14 +240,14 @@ export function dredgePick(st: GameState, side: Side, idx: number, andDraw: bool
   if (idx >= 0 && idx < s.deck.length) {
     const [cid] = s.deck.splice(idx, 1);
     s.deck.push(cid);
-    log(st, `${who}探底,将「${byId[cid].name}」置于牌库顶`);
+    log(st, `${who}探底,将${side === "p" ? `「${byId[cid].name}」` : "一张牌"}置于牌库顶`);
   }
   if (andDraw) draw(st, side, 1);
 }
 export function gainMoonCopy(st: GameState, side: Side, cid: number) {
   const s = st[side];
   if (s.hand.length >= HAND_LIMIT) {
-    log(st, `${side === "p" ? "你" : "对手"}的手牌已满,「${byId[cid].name}」的复制被烧掉了`, true);
+    log(st, `${side === "p" ? "你" : "对手"}的手牌已满,${side === "p" ? `「${byId[cid].name}」` : "一张牌"}的复制被烧掉了`, true);
     return;
   }
   s.hand.push({ uid: UID++, cid, moon: st.turnNum });
@@ -397,7 +425,7 @@ const EFFECTS: EffectRegistry = {
     cast: (st, side, sp, tgt, bonus) => {
       const t = tgt!; // isValidSpellTarget 已保证非空
       const n = sp.n + bonus;
-      if (t.hero) dmgHero(st, t.side, n);
+      if (t.hero) { dmgHero(st, t.side, n); if (sp.freeze) freezeHero(st, t.side); }
       else { dmgMinion(st, t.side, t.uid!, n); if (sp.freeze) freezeMinion(st, t.side, t.uid!); }
       dmgExtras(st, side, sp);
       if (sp.comboDraw && combo(st, side)) draw(st, side, 1); // 鬼魅攻击:连击则抽一张
@@ -408,7 +436,7 @@ const EFFECTS: EffectRegistry = {
       const tgts: AttackTarget[] = st[e].board.map((m) => ({ uid: m.uid }));
       tgts.push({ hero: true });
       const t = randPick(st, tgts);
-      if (t.hero) dmgHero(st, e, n);
+      if (t.hero) { dmgHero(st, e, n); if (sp.freeze) freezeHero(st, e); }
       else { dmgMinion(st, e, t.uid!, n); if (sp.freeze) freezeMinion(st, e, t.uid!); }
       dmgExtras(st, side, sp);
       if (sp.comboDraw && combo(st, side)) draw(st, side, 1);
@@ -526,7 +554,7 @@ const EFFECTS: EffectRegistry = {
         log(st, `「${name}」(随机)从牌库召唤了「${byId[pick].name}」`);
         summonFromDeck(st, side, pick);
       } else {
-        log(st, `「${name}」(随机)从牌库施放了「${byId[pick].name}」`);
+        log(st, side === "p" ? `「${name}」(随机)从牌库施放了「${byId[pick].name}」` : `「${name}」(随机)从牌库施放了一张法术`);
         castDeckSpell(st, side, pick);
       }
     },
@@ -637,9 +665,9 @@ function drawSpell(st: GameState, side: Side) {
   if (!spells.length) { log(st, `${who}的牌库中没有法术牌`); return; }
   const pick = randPick(st, spells);
   removeFromDeck(st, side, pick);
-  if (s.hand.length >= HAND_LIMIT) { log(st, `${who}的手牌已满,「${byId[pick].name}」被烧掉了`, true); return; }
+  if (s.hand.length >= HAND_LIMIT) { log(st, `${who}的手牌已满,${side === "p" ? `「${byId[pick].name}」` : "一张牌"}被烧掉了`, true); return; }
   s.hand.push({ uid: UID++, cid: pick });
-  log(st, `${who}从牌库抽到了法术牌「${byId[pick].name}」`);
+  log(st, side === "p" ? `你从牌库抽到了法术牌「${byId[pick].name}」` : "对手从牌库抽到了一张法术牌");
 }
 
 // 按 k 动态取处理器:TS 无法表达"索引出的 handler 与传入的 sp 同 k",在此做一次本地断言收口。
@@ -695,6 +723,22 @@ export function isValidSpellTarget(st: GameState, side: Side, sp: SpellDef | und
   return !!tgt.uid && !!targetSide.board.find((m) => m.uid === tgt.uid);
 }
 
+// 法术日志的目标名:英雄按视角译成「敌方英雄/你的英雄/自身英雄」,随从取卡名
+function tgtName(st: GameState, side: Side, tgt: SpellTarget | null): string {
+  if (!tgt) return "";
+  if (tgt.hero) return tgt.side === side ? "自身英雄" : side === "p" ? "敌方英雄" : "你的英雄";
+  const m = st[tgt.side].board.find((x) => x.uid === tgt.uid);
+  return m ? `「${m.name}」` : "目标";
+}
+// 法术宣告日志的伤害/目标后缀(只显示造成的伤害)。须在效果结算前调用,目标随从尚未死亡。
+function spellDetail(st: GameState, side: Side, sp: SpellDef, tgt: SpellTarget | null): string {
+  const bonus = st[side].spellDmg || 0;
+  if (sp.k === "dmg") return `,对${tgtName(st, side, tgt)}造成 ${sp.n + bonus} 点伤害`;
+  if (sp.k === "aoe") return `,对所有敌方随从造成 ${sp.n + bonus} 点伤害`;
+  if (sp.k === "heal") return `,为${tgtName(st, side, tgt)}恢复 ${sp.n} 点生命`;
+  if (sp.k === "buff") return `,使${tgtName(st, side, tgt)}获得 +${sp.a}/+${sp.h}`;
+  return "";
+}
 export function castSpell(st: GameState, side: Side, i: number, tgt: SpellTarget | null): boolean {
   const s = st[side];
   if (!s) return false;
@@ -710,6 +754,12 @@ export function castSpell(st: GameState, side: Side, i: number, tgt: SpellTarget
   if (cost > s.mana || !isValidSpellTarget(st, side, sp, tgt)) return false;
   s.mana -= cost;
   s.hand.splice(i, 1);
+  // 指向性法术:记录从施法者英雄指向目标的箭头(治疗绿、增益金、其余红)
+  if (tgt) {
+    const kind: ActMark["kind"] = sp.k === "heal" ? "heal" : sp.k === "buff" || sp.k === "bounce" || sp.k === "shadowstep" ? "buff" : "dmg";
+    markAct(st, kind, { side, hero: true }, { side: tgt.side, uid: tgt.uid, hero: tgt.hero });
+  }
+  log(st, `${side === "p" ? "你" : "对手"}施放了「${c.name}」${spellDetail(st, side, sp, tgt)}`); // 先宣告施放,效果内部日志(抽牌/换手等)排在其后
   handler.cast(st, side, sp, tgt, s.spellDmg || 0);
   afterSpellPlayed(st, side, c.id);
   moonTutor(st, side, en);
@@ -731,16 +781,21 @@ export function resolveAttack(st: GameState, side: Side, auid: number, tgt: Atta
     if (taunts.length) return false;
     A.attacked = true;
     A.charge = false; A.rush = false; // 登场攻击后清掉一次性登场效果(角标随之消失)
+    markAct(st, "attack", { side, uid: auid }, { side: e, hero: true });
     dmgHero(st, e, A.atk);
+    log(st, `${side === "p" ? "你的" : "对手的"}「${A.name}」攻击${side === "p" ? "敌方英雄" : "你的英雄"},造成 ${A.atk} 点伤害`);
     return true;
   }
   const D = defender.board.find((m) => m.uid === tgt.uid);
   if (!D || (taunts.length && !D.taunt)) return false;
   A.attacked = true;
   A.charge = false; A.rush = false; // 登场攻击后清掉一次性登场效果(角标随之消失)
+  markAct(st, "attack", { side, uid: auid }, { side: e, uid: D.uid });
   const dAtk = D.atk;
+  const aAtk = A.atk, aName = A.name, dName = D.name; // 先捕获名字与攻击力(随从可能因伤害死亡)
   dmgMinion(st, e, D.uid, A.atk);
   dmgMinion(st, side, A.uid, dAtk);
+  log(st, `${side === "p" ? "你的" : "对手的"}「${aName}」攻击「${dName}」,造成 ${aAtk} 点伤害`);
   return true;
 }
 
@@ -775,22 +830,27 @@ export function resolveHeroAttack(st: GameState, side: Side, tgt: AttackTarget |
   const defender = st[e];
   if (!s || !defender) return false;
   const atk = heroAtkVal(s);
-  if (atk <= 0 || s.heroAttacked) return false;
+  if (atk <= 0 || s.heroAttacked || s.heroFrozen) return false;
   const taunts = defender.board.filter((m) => m.taunt);
   if (tgt.hero) {
     if (taunts.length) return false;
     s.heroAttacked = true;
+    markAct(st, "attack", { side, hero: true }, { side: e, hero: true });
     dmgHero(st, e, atk);
     consumeWeaponDur(st, side);
+    log(st, `${side === "p" ? "你的" : "对手的"}英雄攻击${side === "p" ? "敌方英雄" : "你的英雄"},造成 ${atk} 点伤害`);
     return true;
   }
   const D = defender.board.find((m) => m.uid === tgt.uid);
   if (!D || (taunts.length && !D.taunt)) return false;
   s.heroAttacked = true;
+  markAct(st, "attack", { side, hero: true }, { side: e, uid: D.uid });
   const dAtk = D.atk;
+  const dName = D.name; // 先捕获名字(随从可能因伤害死亡)
   dmgMinion(st, e, D.uid, atk);
   if (dAtk > 0) dmgHero(st, side, dAtk); // 反击伤害
   consumeWeaponDur(st, side);
+  log(st, `${side === "p" ? "你的" : "对手的"}英雄攻击「${dName}」,造成 ${atk} 点伤害`);
   return true;
 }
 
@@ -807,6 +867,7 @@ export function playWeapon(st: GameState, side: Side, i: number): boolean {
   s.mana -= cost;
   s.hand.splice(i, 1);
   equipWeapon(st, side, c.id);
+  log(st, `${side === "p" ? "你" : "对手"}装备了「${c.name}」`);
   s.playedThisTurn = (s.playedThisTurn || 0) + 1;
   moonTutor(st, side, en);
   mapTutor(st, side, en);
@@ -833,10 +894,10 @@ export function useHeroPower(st: GameState, side: Side): boolean {
 }
 
 // seed 缺省取系统熵;测试传入固定 seed 即可复现整局。
-export function initGame(playerDeck: number[] | null = null, playerClass?: ClassId, seed: number = (Date.now() ^ (Math.random() * 0x100000000)) | 0, aiDeck: number[] | null = null, aiClass?: ClassId): GameState {
+export function initGame(playerDeck: number[] | null = null, playerClass?: ClassId, seed: number = (Date.now() ^ (Math.random() * 0x100000000)) | 0, aiDeck: number[] | null = null, aiClass?: ClassId, mulligan = false): GameState {
   const st: GameState = {
     phase: "play", turn: "p", first: "p", turnNum: 0, winner: null, rngState: seed | 0, fx: [], logs: [], notice: null, pending: null,
-    lastLog: "", banner: null,
+    lastLog: "", banner: null, act: null,
     p: { hp: 30, armor: 0, mana: 0, maxMana: 0, fatigue: 0, spellDmg: 0, weapon: null, heroAtk: 0, deck: [], hand: [], board: [] },
     a: { hp: 30, armor: 0, mana: 0, maxMana: 0, fatigue: 0, spellDmg: 0, weapon: null, heroAtk: 0, deck: [], hand: [], board: [] },
   };
@@ -859,7 +920,44 @@ export function initGame(playerDeck: number[] | null = null, playerClass?: Class
     : "对手获得先手,你作为后手多抽一张牌并获得「幸运币」。");
   draw(st, first, 3);
   draw(st, second, 4);
+  if (mulligan) {
+    // 起手调度:AI 自动调度,玩家通过 pending 弹窗手动调度;幸运币与先手回合都推迟到 finishMulligan
+    aiMulligan(st, "a");
+    st.pending = { k: "mulligan" };
+    return st;
+  }
   st[second].hand.push({ uid: UID++, cid: COIN.id });
   if (first === "p") startTurn(st, "p");
   return st;
+}
+
+// 起手调度:把指定手牌(按 uid)换掉——先从牌库顶补抽同样数量,再把换掉的牌洗回牌库,
+// 故换掉的牌当次不可能被重新抽到(炉石规则)。走 rand(st) 保证可复现。
+export function applyMulligan(st: GameState, side: Side, replaceUids: number[]) {
+  const s = st[side];
+  if (!replaceUids.length) return;
+  const set = new Set(replaceUids);
+  const toReplace = s.hand.filter((c) => set.has(c.uid));
+  s.hand = s.hand.filter((c) => !set.has(c.uid));
+  const rng = () => rand(st);
+  for (let i = 0; i < toReplace.length && s.deck.length; i++) {
+    s.hand.push({ uid: UID++, cid: s.deck.pop()! });
+  }
+  for (const c of toReplace) s.deck.push(c.cid);
+  shuffle(s.deck, rng);
+}
+
+// AI 起手调度:简单曲线策略——换掉费用 ≥4 的牌,留下早期可打的低费牌
+function aiMulligan(st: GameState, side: Side) {
+  const replace = st[side].hand.filter((c) => byId[c.cid].cost >= 4).map((c) => c.uid);
+  applyMulligan(st, side, replace);
+}
+
+// 玩家确认调度:换牌 → 关闭弹窗 → 给后手方幸运币 → 若玩家先手则正式开始其回合
+export function finishMulligan(st: GameState, replaceUids: number[]) {
+  applyMulligan(st, "p", replaceUids);
+  st.pending = null;
+  const second = other(st.first);
+  st[second].hand.push({ uid: UID++, cid: COIN.id });
+  if (st.first === "p") startTurn(st, "p");
 }

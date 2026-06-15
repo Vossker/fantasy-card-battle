@@ -11,6 +11,9 @@ export const CSS = `
 @keyframes banner{0%{opacity:0;transform:scale(.5)}18%{opacity:1;transform:scale(1.08)}32%{transform:scale(1)}70%{opacity:1}100%{opacity:0;transform:scale(1.02)}}
 @keyframes noticeFx{0%{opacity:0;transform:translateY(12px)}10%{opacity:1;transform:translateY(0)}80%{opacity:1}100%{opacity:0}}
 @keyframes frostShimmer{0%,100%{box-shadow:inset 0 0 12px rgba(210,245,255,.85),0 0 10px rgba(120,200,255,.7)}50%{box-shadow:inset 0 0 18px rgba(235,250,255,1),0 0 16px rgba(150,220,255,.95)}}
+@keyframes lungeU{0%{transform:translateY(0)}42%{transform:translateY(-13px) scale(1.06)}100%{transform:translateY(0)}}
+@keyframes lungeD{0%{transform:translateY(0)}42%{transform:translateY(13px) scale(1.06)}100%{transform:translateY(0)}}
+@keyframes die{0%{opacity:1;transform:scale(1) rotate(0)}100%{opacity:0;transform:scale(.5) rotate(10deg)}}
 `;
 
 export type FloatsFn = (key: string) => ReactNode;
@@ -23,9 +26,10 @@ export const Badge = ({ pos, v, bg, size = 28 }: { pos: "bl" | "br"; v: number; 
   </span>
 );
 
-export const MinionEl = ({ side, m, myTurn, selAtk, isT, clickEntity, floats }: {
+export const MinionEl = ({ side, m, myTurn, selAtk, isT, clickEntity, floats, lunge = null }: {
   side: Side; m: Minion; myTurn: boolean; selAtk: number | null;
   isT: IsTargetFn; clickEntity: ClickEntityFn; floats: FloatsFn;
+  lunge?: "u" | "d" | null; // 发起攻击时的前顶动画方向(玩家向上 / AI 向下)
 }) => {
   const mine = side === "p";
   const ready = mine && myTurn && !m.attacked && !m.frozen && (!m.sick || m.rush); // 突袭随从在 sick 期间也可行动(打随从);冻结时不可行动
@@ -45,7 +49,8 @@ export const MinionEl = ({ side, m, myTurn, selAtk, isT, clickEntity, floats }: 
         background: mine ? "linear-gradient(160deg,#6b5430,#41331a)" : "linear-gradient(160deg,#4a3354,#2c1d33)",
         border: m.taunt ? "3px solid #9aa5b1" : "2px solid " + (mine ? "#c9a85a" : "#8a6da8"),
         boxShadow: tgt ? "none" : sel ? "0 0 0 3px #ffd700,0 0 14px #ffd700" : ready ? "0 0 10px rgba(80,220,100,.85),0 0 0 2px rgba(80,220,100,.6)" : "0 2px 5px rgba(0,0,0,.5)",
-        animation: tgt ? "pulseR 1s infinite" : "none",
+        animation: lunge ? (lunge === "u" ? "lungeU .26s ease" : "lungeD .26s ease") : tgt ? "pulseR 1s infinite" : "none",
+        zIndex: lunge ? 30 : undefined,
         display: "flex", alignItems: "center", justifyContent: "center",
       }}
     >
@@ -155,6 +160,11 @@ export const HeroEl = ({ side, h, isT, clickEntity, floats, canAtk = false, sel 
           <span style={{ color: "#ff8585" }}>❤️{h.hp}</span>
           {h.armor > 0 && <span style={{ color: "#bfd3e6" }}>🛡️{h.armor}</span>}
         </div>
+        {h.heroFrozen && (
+          <div title="冻结:下个回合无法攻击" style={{ position: "absolute", inset: 0, borderRadius: 14, background: "linear-gradient(160deg,rgba(160,225,255,.5),rgba(90,160,230,.4))", border: "2px solid #cdeeff", animation: "frostShimmer 1.6s ease-in-out infinite", display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none", zIndex: 4 }}>
+            <span style={{ fontSize: 24, filter: "drop-shadow(0 0 4px #fff)" }}>❄️</span>
+          </div>
+        )}
         {floats(side + "-hero")}
       </div>
 
@@ -190,14 +200,15 @@ export const HeroEl = ({ side, h, isT, clickEntity, floats, canAtk = false, sel 
   );
 };
 
-export const HandCard = ({ c, transformed, i, selHand, mana, myTurn, handleHand, setHovHand, cost, bonus }: {
+export const HandCard = ({ c, transformed, i, selHand, mana, myTurn, handleHand, setHovHand, cost, bonus, bcReady }: {
   c: Card; transformed: boolean; i: number; selHand: number | null; mana: number; myTurn: boolean;
   handleHand: (i: number) => void; setHovHand: (i: number | null) => void;
-  cost: number; bonus: number;
+  cost: number; bonus: number; bcReady?: boolean;
 }) => {
   const sel = selHand === i;
   const afford = cost <= mana && myTurn;
   const discounted = cost < c.cost;
+  const taxed = cost > c.cost; // 被加税(洛欧塞布等):费用高于原始费用,数字标红
   return (
     <div
       data-hand={i}
@@ -209,13 +220,13 @@ export const HandCard = ({ c, transformed, i, selHand, mana, myTurn, handleHand,
         transform: sel ? "translateY(-20px) scale(1.12)" : "none", transition: "transform .15s",
         zIndex: sel ? 40 : 10 + i,
         background: c.type === "m" ? "linear-gradient(170deg,#7a5c33,#4a3517 70%)" : c.type === "w" ? "linear-gradient(170deg,#5e6470,#2e3138 70%)" : "linear-gradient(170deg,#3d4f8a,#23284e 70%)",
-        border: sel ? "2px solid #ffd700" : "2px solid " + (transformed ? "#b66be0" : c.type === "m" ? "#caa45c" : c.type === "w" ? "#aab2be" : "#7d90d8"),
-        boxShadow: sel ? "0 6px 16px rgba(0,0,0,.6),0 0 12px rgba(255,215,0,.5)" : transformed ? "0 3px 6px rgba(0,0,0,.55),0 0 10px rgba(182,107,224,.7)" : "0 3px 6px rgba(0,0,0,.55)",
+        border: sel || bcReady ? "2px solid #ffd700" : "2px solid " + (transformed ? "#b66be0" : c.type === "m" ? "#caa45c" : c.type === "w" ? "#aab2be" : "#7d90d8"),
+        boxShadow: sel ? "0 6px 16px rgba(0,0,0,.6),0 0 12px rgba(255,215,0,.5)" : bcReady ? "0 3px 6px rgba(0,0,0,.55),0 0 10px rgba(255,215,0,.55)" : transformed ? "0 3px 6px rgba(0,0,0,.55),0 0 10px rgba(182,107,224,.7)" : "0 3px 6px rgba(0,0,0,.55)",
         filter: afford ? "none" : "grayscale(.7) brightness(.72)",
         display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, padding: "6px 3px",
       }}
     >
-      <span style={{ position: "absolute", top: -8, left: -8, width: 26, height: 26, borderRadius: "50%", background: discounted ? "radial-gradient(circle at 35% 30%,#b9f2c4,#1f9c44 60%,#0b5e26)" : "radial-gradient(circle at 35% 30%,#9fd6ff,#1f63c4 60%,#0b3a7e)", border: "2px solid " + (discounted ? "#d6f5dc" : "#cfe6ff"), color: "#fff", fontSize: 14, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 5 }}>
+      <span style={{ position: "absolute", top: -8, left: -8, width: 26, height: 26, borderRadius: "50%", background: "radial-gradient(circle at 35% 30%,#9fd6ff,#1f63c4 60%,#0b3a7e)", border: "2px solid #cfe6ff", color: taxed ? "#ff5a5a" : discounted ? "#5df08a" : "#fff", fontSize: 14, fontWeight: 900, textShadow: "0 1px 2px rgba(0,0,0,.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 5 }}>
         {cost}
       </span>
       <span style={{ fontSize: 29, lineHeight: 1 }}>{c.emoji}</span>
