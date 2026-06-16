@@ -35,9 +35,13 @@ export interface SelfPlayResult {
   ms: number; // 总耗时(毫秒)
 }
 
-// 让 side 方用现有启发式 AI 打完整整一回合(含回合开始抽牌、出牌、攻击、回合结束清理),返回新状态。
-function takeTurn(st: GameState, side: Side): GameState {
-  // p 方:交换视角让 computeAiTurn 以为自己是 "a"。computeAiTurn 内部 clone,故就地交换安全(入参随后丢弃)。
+// 策略接口:输入"回合开始前"的状态与行动方,返回该方打完整整一回合后的新状态。
+// 约定策略自身负责 startTurn 与回合结束清理(与 computeAiTurn 一致),且不依赖修改入参。
+export type Policy = (st: GameState, side: Side) => GameState;
+
+// 现有启发式 AI(aiPlay/aiAttack/aiHeroAttack 经 computeAiTurn 串成整回合)封装为 side 无关策略:
+// computeAiTurn 只驱动 "a" 且自带 startTurn、不改入参,故 p 方行动时交换 a/p、打完换回并翻转 winner。
+export const heuristicPolicy: Policy = (st, side) => {
   if (side === "p") { const t = st.a; st.a = st.p; st.p = t; }
   const snaps = computeAiTurn(st);
   const last = snaps[snaps.length - 1]; // computeAiTurn 至少产出 1 帧(startTurn 后即 push),末帧为本回合终态
@@ -46,10 +50,10 @@ function takeTurn(st: GameState, side: Side): GameState {
     if (last.winner) last.winner = other(last.winner); // 翻转回真实视角
   }
   return last;
-}
+};
 
-// 跑一整局。固定 seed 即可完整复现(引擎随机全走 rngState)。
-export function playOneGame(p: DeckSpec, a: DeckSpec, seed: number, turnCap = 100): GameResult {
+// 跑一整局。固定 seed 即可完整复现(引擎随机全走 rngState)。pPol/aPol 分别驱动 p / a 方的回合。
+export function playOneGame(p: DeckSpec, a: DeckSpec, pPol: Policy, aPol: Policy, seed: number, turnCap = 100): GameResult {
   // mulligan=true 让 initGame 在起手调度处提前返回——绕过它对先手方的预启动(startTurn),
   // 把"回合开始"统一交给 takeTurn/computeAiTurn 负责,避免先手首回合被启动两次。
   const st = initGame(p.cards, p.cls, seed, a.cards, a.cls, true);
@@ -65,7 +69,7 @@ export function playOneGame(p: DeckSpec, a: DeckSpec, seed: number, turnCap = 10
   let turns = 0;
   while (!cur.winner && turns < turnCap) {
     cur.turn = turn;
-    cur = takeTurn(cur, turn);
+    cur = (turn === "p" ? pPol : aPol)(cur, turn);
     turns++;
     if (cur.winner) break;
     cur.turnNum = (cur.turnNum || 0) + 1;
@@ -75,11 +79,11 @@ export function playOneGame(p: DeckSpec, a: DeckSpec, seed: number, turnCap = 10
 }
 
 // 批量自对弈。每局用不同(但确定)的 seed,统计聚合结果。
-export function runSelfPlay(p: DeckSpec, a: DeckSpec, n: number, seed0 = 1): SelfPlayResult {
+export function runSelfPlay(p: DeckSpec, a: DeckSpec, pPol: Policy, aPol: Policy, n: number, seed0 = 1): SelfPlayResult {
   const t0 = Date.now();
   let pWins = 0, aWins = 0, draws = 0, firstWins = 0, totTurns = 0;
   for (let i = 0; i < n; i++) {
-    const r = playOneGame(p, a, (seed0 + Math.imul(i, 0x9e3779b1)) | 0);
+    const r = playOneGame(p, a, pPol, aPol, (seed0 + Math.imul(i, 0x9e3779b1)) | 0);
     totTurns += r.turns;
     if (r.winner === "p") pWins++;
     else if (r.winner === "a") aWins++;

@@ -12,7 +12,7 @@ import {
   sampleDeck, sampleDeckAny, campEffect, campLabel, applyOpt, moonTutor, mapTutor, resolveMapFollow, gainMoonCopy, spSummary,
   draw, dredgePick, mapTake, mapDrawLeft,
 } from "./engine";
-import { computeAiTurn } from "./ai";
+import { computeValueAiTurn } from "./valuePolicy";
 import { CSS, MinionEl, HeroEl, HandCard, Badge } from "./ui/components";
 import type { BloomMode, CampOpt, ClassId, GameState, Minion, Side } from "./types";
 
@@ -249,7 +249,8 @@ export default function ArcaneThrone() {
   const AI_STEP = 1100; // AI 回合每步快照回放间隔(ms);放慢以便看清攻击箭头/前顶动画(「⏩跳过」可加速)
   function runAiTurn(base: GameState) {
     setGame(base);
-    const snaps = computeAiTurn(base);
+    // AI 改用 CEM 训练后的价值策略(含浅层 lookahead);computeValueAiTurn 产出与旧 computeAiTurn 相同的逐帧快照契约
+    const snaps = computeValueAiTurn(base);
     aiSnaps.current = snaps;
     snaps.forEach((s, i) => T(() => setGame(s), AI_STEP * (i + 1)));
     T(handoverToPlayer, AI_STEP * (snaps.length + 1));
