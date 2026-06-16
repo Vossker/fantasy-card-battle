@@ -82,7 +82,7 @@ export function valueOf(st: GameState, side: Side, w: number[]): number {
 
 // 枚举当前可执行的原子动作。法术按 isValidSpellTarget 展开合法目标;攻击宽松枚举,
 // 由 resolveAttack/resolveHeroAttack 自带的嘲讽/召唤失调/冻结校验在 apply 阶段剪枝。
-// 出牌阶段动作:打牌(随从/武器/法术/交互类)+ 英雄技能。lookahead 搜索只在这层展开(连招都发生在此)。
+// 出牌阶段动作:打牌(随从/武器/法术/交互类)+ 英雄技能。整回合搜索 enumActions 把它与攻击动作合并展开。
 function enumPlayActions(st: GameState, side: Side): Action[] {
   const me = st[side];
   const acts: Action[] = [];
@@ -195,13 +195,14 @@ function signature(st: GameState, side: Side): string {
 }
 
 export interface SearchOpts {
-  nodeCap?: number; // 出牌阶段搜索的节点上限(越大越能找到深连招,越慢)。默认 2000。
-  maxDepth?: number; // 出牌阶段最大动作序列长度。默认 10。
+  nodeCap?: number; // 整回合搜索的节点上限(越大越能找到深连招,越慢)。含攻击后分支变大,默认 6000。
+  maxDepth?: number; // 整回合最大动作序列长度(出牌+攻击交织,需容纳整回合)。默认 14。
 }
 
-// 出牌阶段有界 DFS:穷举动作序列(memo 合并同态、nodeCap 兜底),用 V 给每个到达局面打分。
-// 无分数剪枝——连招中途的"价值凹陷"铺垫步靠穷举越过,与 aiPlanner 同理,只是叶子估值换成可训练的 V。
-// 返回最高分局面 best 及到达它的动作序列 actions(供部署时逐帧重放出牌动画;训练只用 best)。
+// 整回合有界 DFS:出牌与攻击交织穷举动作序列(memo 合并同态、nodeCap 兜底),用 V 给每个到达局面打分。
+// 攻击进搜索后,"先攻击(对手生命↓→生命差↑)再回收"会严格优于"先回收浪费攻击",由价值函数自然择优——
+// 无需对回收/复制类法术加硬规则。无分数剪枝:连招中途的"价值凹陷"铺垫步靠穷举越过,叶子估值用可训练的 V。
+// 返回最高分局面 best 及到达它的动作序列 actions(供部署时逐帧重放动画;训练只用 best)。
 function searchPlayPhase(
   st: GameState, side: Side, w: number[], nodeCap: number, maxDepth: number,
 ): { best: GameState; actions: Action[] } {
@@ -214,7 +215,7 @@ function searchPlayPhase(
     const v = valueOf(s, side, w);
     if (v > bestV) { bestV = v; best = s; bestActions = acts.slice(); }
     if (s.winner || depth >= maxDepth || nodes >= nodeCap) return;
-    for (const act of enumPlayActions(s, side)) {
+    for (const act of enumActions(s, side)) {
       if (nodes >= nodeCap) return;
       const ns = clone(s);
       if (!applyAct(ns, side, act)) continue;
@@ -231,7 +232,7 @@ function searchPlayPhase(
   return { best, actions: bestActions };
 }
 
-// 攻击阶段:1-ply 贪婪(攻击顺序极少影响结果;斩杀靠面伤逐次为正自然串成)。
+// 攻击收尾:1-ply 贪婪兜底(搜索受 nodeCap 截断时漏掉的攻击在此补上;攻击顺序极少影响结果)。
 function greedyAttacks(st: GameState, side: Side, w: number[]): GameState {
   let cur = st;
   let guard = 0;
@@ -253,8 +254,8 @@ function greedyAttacks(st: GameState, side: Side, w: number[]): GameState {
 // 浅层 lookahead 版整回合:出牌阶段有界搜索找最优(含连招)铺场线 → 攻击阶段贪婪 → 回合结束清理。
 // 与 playValueTurn 同约定(入参为回合开始前状态,自负责 startTurn/清理),可直接替换为 Policy。
 export function playValueTurnSearch(st: GameState, side: Side, w: number[], opts: SearchOpts = {}): GameState {
-  const nodeCap = opts.nodeCap ?? 2000;
-  const maxDepth = opts.maxDepth ?? 10;
+  const nodeCap = opts.nodeCap ?? 6000;
+  const maxDepth = opts.maxDepth ?? 14;
   let cur = clone(st);
   startTurn(cur, side);
   if (cur.winner) return cur; // 疲劳致死
@@ -270,8 +271,8 @@ export function playValueTurnSearch(st: GameState, side: Side, w: number[], opts
 // UI 以固定间隔逐帧 setGame 回放成"AI 一步步出牌"。每帧前清 fx/act,使动作的浮字/攻击箭头逐帧呈现。
 // 出牌阶段把搜索得到的最优动作序列在真实 state 上逐个重放(确定性,必然复现搜索时的最优局面)。
 export function computeValueAiTurn(b: GameState, w: number[] = DEFAULT_WEIGHTS, opts: SearchOpts = {}): GameState[] {
-  const nodeCap = opts.nodeCap ?? 2000;
-  const maxDepth = opts.maxDepth ?? 10;
+  const nodeCap = opts.nodeCap ?? 6000;
+  const maxDepth = opts.maxDepth ?? 14;
   const side: Side = "a";
   const snaps: GameState[] = [];
   const st = clone(b);

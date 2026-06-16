@@ -10,6 +10,7 @@ import {
 import { byId, DAGGER } from "./cards";
 import { aiPlay, computeAiTurn } from "./ai";
 import { planPlayPhase } from "./aiPlanner";
+import { computeValueAiTurn, DEFAULT_WEIGHTS } from "./valuePolicy";
 
 // ---------- 构造最小 state 的辅助 ----------
 const side = (over: Partial<SideState> = {}): SideState => ({
@@ -743,6 +744,19 @@ describe("AI 战斗逻辑改进", () => {
     const snaps = computeAiTurn(base);
     // 出牌阶段伴侣可攻击不回收 → 攻击阶段挥拳 → 攻击后 pass 才回收重打:某帧伴侣应出现在手牌
     expect(snaps.some((s) => s.a.hand.some((e) => e.cid === 50))).toBe(true);
+  });
+
+  it("价值策略:不先攻击就回收——搜索含攻击后,能攻击的随从先打脸再考虑回收(街舞起跳)", () => {
+    // a 场上 5/5 可攻击(非召唤失调),手握街舞起跳(1 费),对手空场 30 血。
+    // 修复前:出牌阶段搜索只枚举出牌,会先街舞把 5/5 换成召唤失调的突袭舞者(打不了脸)→ 面伤白丢,opp 仍 30。
+    // 修复后:搜索枚举攻击动作,"先攻击脸(生命差↑,权重 3.18)再回收"严格占优 → 5/5 先打脸,opp 掉血。
+    const base = mkState({
+      a: side({ hp: 30, maxMana: 0, mana: 0, heroPowerUsed: true, deck: [17], hand: [{ uid: 1, cid: 41 }], board: [minion({ uid: 10, atk: 5, hp: 5, sick: false })] }),
+      p: side({ hp: 30, board: [] }),
+    });
+    const snaps = computeValueAiTurn(base, DEFAULT_WEIGHTS);
+    const last = snaps[snaps.length - 1];
+    expect(last.p.hp).toBeLessThan(30); // 5/5 先攻击了脸,而非被直接回收浪费攻击
   });
 });
 
